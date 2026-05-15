@@ -1,0 +1,23 @@
+# Build outputs
+build/
+*.app
+*.dmg
+
+# macOS Finder cruft
+.DS_Store
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# Swift compile artifacts (if a future SPM/Xcode setup is added)
+.build/
+.swiftpm/
+DerivedData/
+*.xcuserstate
+*.xcworkspace/xcuserdata/
+
+# Test scratch
+/tmp/

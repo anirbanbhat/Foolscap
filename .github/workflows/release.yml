@@ -1,0 +1,135 @@
+name: Release
+
+# Triggered on a version tag push (e.g. `v0.1.0`) or manually.
+#
+# To cut a release:
+#   git tag v0.1.0
+#   git push origin v0.1.0
+#
+# The workflow builds Foolscap.app, packs it into a .dmg, runs the test
+# suite, and attaches the .dmg to a GitHub release.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g. v0.1.0). Required when running manually.'
+        required: true
+        default: 'v0.0.0'
+
+jobs:
+  release:
+    runs-on: macos-latest
+
+    permissions:
+      contents: write   # Needed to create a GitHub release and upload assets.
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          # Use the newest Xcode the runner image provides.
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)/Contents/Developer"
+          swift --version
+
+      - name: Resolve version
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            echo "tag=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run tests
+        run: ./test.sh
+
+      - name: Build app
+        run: ./build.sh
+
+      - name: Stage .dmg contents
+        run: |
+          set -euo pipefail
+          rm -rf dmg-staging
+          mkdir -p dmg-staging
+          # The build script produces a lowercase bundle; give it the
+          # display-friendly name inside the disk image.
+          cp -R build/foolscap.app "dmg-staging/Foolscap.app"
+          # Drag-to-/Applications shortcut inside the .dmg.
+          ln -s /Applications dmg-staging/Applications
+
+      - name: Create .dmg
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.tag }}"
+          DMG_NAME="Foolscap-${VERSION}.dmg"
+          hdiutil create \
+            -volname "Foolscap" \
+            -srcfolder dmg-staging \
+            -ov \
+            -format UDZO \
+            "${DMG_NAME}"
+          shasum -a 256 "${DMG_NAME}" | tee "${DMG_NAME}.sha256"
+          echo "DMG_NAME=${DMG_NAME}" >> "$GITHUB_ENV"
+
+      - name: Write release notes
+        run: |
+          VERSION="${{ steps.version.outputs.tag }}"
+          {
+            echo "# Foolscap ${VERSION}"
+            echo
+            echo "Native macOS text and code editor in the spirit of Notepad++ — pure AppKit/Swift, no Electron."
+            echo
+            echo "## Highlights"
+            echo
+            echo "- **Tabbed editing** in two modes: single-file (native macOS window tabs) and workspace (sidebar + in-window tabs)."
+            echo "- **Find** in current buffer and **Find in Workspace** with regex + case sensitivity."
+            echo "- **Syntax highlighting** for Swift, Python, JavaScript, JSON, Markdown, HTML, CSS, YAML, XML, shell, C, C++, Go, Rust, plain text."
+            echo "- **Quick navigation**: ⌘P jumps to any file in the workspace; ⌘R jumps to any symbol in the current buffer."
+            echo "- **Smart editing**: auto-close brackets/quotes, word autocomplete from the buffer (⌥ESC), bracket matching, occurrence highlight."
+            echo "- **EditorConfig** support — \`indent_style\`, \`indent_size\`, \`end_of_line\`, \`charset\`, \`trim_trailing_whitespace\`, \`insert_final_newline\` applied on open and save."
+            echo "- **Split editor** (⌘\\\\) — same buffer in two side-by-side panes with independent cursors and scroll positions."
+            echo "- **Minimap** (⌥⌘M), **indent guides** (⇧⌘I), **show invisibles** (⇧⌘U)."
+            echo "- **Line operations**: duplicate (⇧⌘D), delete (⇧⌘K), move (⌥↑/↓), sort, trim trailing whitespace."
+            echo "- **Bookmarks** (⌘F2 / F2 / ⇧F2) and **mark-all** (⇧⌘M) in the gutter."
+            echo "- **Change-history stripes** in the gutter — orange for unsaved, green for saved-modified."
+            echo "- **Goto Line** (⌘L), case conversion, Base64/URL/HTML encode-decode."
+            echo "- **In-app user guide** under Help (⌘?)."
+            echo
+            echo "## Install"
+            echo
+            echo "1. Download \`${DMG_NAME}\` below."
+            echo "2. Open the disk image and drag **Foolscap.app** into your **Applications** folder."
+            echo "3. On first launch macOS may say the app is from an unidentified developer. Right-click the app and choose **Open**, or run:"
+            echo
+            echo "   \`\`\`sh"
+            echo "   xattr -dr com.apple.quarantine /Applications/Foolscap.app"
+            echo "   \`\`\`"
+            echo
+            echo "The build is ad-hoc signed only — it is not notarized. Apple's Gatekeeper warning is expected until/unless the app is signed with a paid Developer ID."
+            echo
+            echo "## Verifying the download"
+            echo
+            echo "\`\`\`sh"
+            echo "shasum -a 256 ${DMG_NAME}"
+            echo "\`\`\`"
+            echo
+            echo "Compare against \`${DMG_NAME}.sha256\` attached to this release."
+          } > release_notes.md
+          cat release_notes.md
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Foolscap ${{ steps.version.outputs.tag }}
+          body_path: release_notes.md
+          generate_release_notes: true
+          files: |
+            Foolscap-*.dmg
+            Foolscap-*.dmg.sha256
