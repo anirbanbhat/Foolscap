@@ -1,0 +1,35 @@
+name: CI
+
+# Runs on every pull request targeting main, plus pushes to any branch
+# *other* than main (main pushes are handled by release.yml, which also
+# runs tests as a gate before publishing).
+#
+# This is a fast feedback loop: compile the test binary, run the suite,
+# build the .app. No release artifacts.
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches-ignore:
+      - main
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)/Contents/Developer"
+          swift --version
+
+      - name: Run tests
+        run: ./test.sh
+
+      - name: Build app
+        run: ./build.sh
