@@ -88,9 +88,18 @@ enum FileIcon {
     private static let openDirectoryStyle = Style(symbol: "folder.fill", color: NSColor(srgbRed: 0.55, green: 0.75, blue: 0.95, alpha: 1))
     private static let unknownStyle = Style(symbol: "doc", color: NSColor.secondaryLabelColor)
 
+    /// Cache by (symbol + RGB) so repeated outline-view cell renders are
+    /// near-free. Without this, scrolling the sidebar would lockFocus-tint
+    /// fresh images on every redraw.
+    private static var cache: [String: NSImage] = [:]
+
     static func icon(for url: URL, isDirectory: Bool) -> NSImage {
         let style = resolveStyle(for: url, isDirectory: isDirectory)
-        return tintedSymbol(style)
+        let key = style.symbol + ":" + colorKey(style.color)
+        if let cached = cache[key] { return cached }
+        let img = renderSymbol(style)
+        cache[key] = img
+        return img
     }
 
     private static func resolveStyle(for url: URL, isDirectory: Bool) -> Style {
@@ -102,22 +111,21 @@ enum FileIcon {
         return unknownStyle
     }
 
-    private static func tintedSymbol(_ style: Style) -> NSImage {
-        let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .semibold)
-        guard let raw = NSImage(systemSymbolName: style.symbol, accessibilityDescription: nil)?
-                .withSymbolConfiguration(config) else {
-            return NSImage(size: NSSize(width: 14, height: 14))
-        }
-        // Tinted, non-template copy so the colour we set actually shows up.
-        let size = raw.size
-        let tinted = NSImage(size: size)
-        tinted.lockFocus()
-        style.color.set()
-        let rect = NSRect(origin: .zero, size: size)
-        raw.draw(in: rect)
-        rect.fill(using: .sourceAtop)
-        tinted.unlockFocus()
-        tinted.isTemplate = false
-        return tinted
+    private static func renderSymbol(_ style: Style) -> NSImage {
+        // Use SymbolConfiguration(paletteColors:) instead of lockFocus
+        // tinting — orders of magnitude faster and avoids the implicit
+        // off-screen window lockFocus would otherwise allocate per call.
+        let sizing = NSImage.SymbolConfiguration(pointSize: 14, weight: .semibold)
+        let paletted = NSImage.SymbolConfiguration(paletteColors: [style.color])
+        let combined = sizing.applying(paletted)
+        return NSImage(systemSymbolName: style.symbol, accessibilityDescription: nil)?
+                .withSymbolConfiguration(combined)
+            ?? NSImage(size: NSSize(width: 14, height: 14))
+    }
+
+    private static func colorKey(_ color: NSColor) -> String {
+        guard let rgb = color.usingColorSpace(.sRGB) else { return color.description }
+        return String(format: "%.3f,%.3f,%.3f,%.3f",
+                      rgb.redComponent, rgb.greenComponent, rgb.blueComponent, rgb.alphaComponent)
     }
 }

@@ -235,6 +235,14 @@ final class EditorViewController: NSViewController, NSTextStorageDelegate, NSTex
 
     /// Called by the host when changes have been cleared (e.g. after a save).
     /// Transitions "modified" stripes → "saved" stripes.
+    /// Called after the host's EditorConfig walk completes asynchronously.
+    /// Picks up indent settings (tab width, hard/soft tabs) and triggers a
+    /// rehighlight if the EOL choice changed anything visible.
+    func applyHostIndentSettings() {
+        guard isViewLoaded, let host = host else { return }
+        textView.indentSettings = host.indentSettings
+    }
+
     /// Scroll to the very end of the buffer. Used by tail mode.
     func scrollToEnd() {
         guard isViewLoaded else { return }

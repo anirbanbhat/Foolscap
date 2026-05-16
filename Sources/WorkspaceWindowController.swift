@@ -324,7 +324,14 @@ final class WorkspaceWindowController: NSWindowController, NSOutlineViewDataSour
         guard let item = tabViewItem else { return }
         bumpMRU(forIndex: tabView.indexOfTabViewItem(item))
         if let container = item.viewController as? TabContainerViewController, let primary = container.primary {
-            window?.makeFirstResponder(primary.view)
+            // Force the editor's view tree to lay out *now* — without this,
+            // tabs that were added while the main thread was previously
+            // blocked could become visible with a zero-frame text view.
+            container.view.needsLayout = true
+            container.view.layoutSubtreeIfNeeded()
+            primary.textView.needsLayout = true
+            primary.textView.needsDisplay = true
+            window?.makeFirstResponder(primary.textView)
         }
     }
 
