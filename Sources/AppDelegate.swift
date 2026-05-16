@@ -101,7 +101,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.allowsMultipleSelection = false
         panel.prompt = "Open"
         panel.message = "Choose a folder to open as workspace"
-        if panel.runModal() == .OK, let url = panel.url {
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        // If a workspace window is already key, ask: replace it, or open a
+        // new window? If none is open, skip the prompt and just open a new one.
+        let activeWorkspace = NSApp.keyWindow?.windowController as? WorkspaceWindowController
+        if let active = activeWorkspace, active.rootURL != url {
+            let alert = NSAlert()
+            alert.messageText = "Open '\(url.lastPathComponent)' as a workspace?"
+            alert.informativeText = "Open in the current window (replacing '\(active.rootURL.lastPathComponent)') or in a new window?"
+            alert.addButton(withTitle: "New Window")
+            alert.addButton(withTitle: "Current Window")
+            alert.addButton(withTitle: "Cancel")
+            let resp = alert.runModal()
+            switch resp {
+            case .alertFirstButtonReturn:
+                openWorkspace(at: url)
+            case .alertSecondButtonReturn:
+                replaceWorkspace(active, with: url)
+            default:
+                return
+            }
+        } else {
             openWorkspace(at: url)
         }
     }
@@ -112,6 +133,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         let wc = WorkspaceWindowController(folderURL: url)
+        wc.showWindow(nil)
+    }
+
+    /// Replace the current workspace window: close it (honouring unsaved
+    /// changes) then open a new one at the chosen URL at the same screen
+    /// location.
+    private func replaceWorkspace(_ existing: WorkspaceWindowController, with url: URL) {
+        let frame = existing.window?.frame
+        guard existing.window?.delegate?.windowShouldClose?(existing.window!) ?? true else { return }
+        existing.window?.close()
+        let wc = WorkspaceWindowController(folderURL: url)
+        if let f = frame { wc.window?.setFrame(f, display: true) }
         wc.showWindow(nil)
     }
 
@@ -247,11 +280,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         openFolderItem.keyEquivalentModifierMask = [.command, .shift]
         openFolderItem.target = self
         fileMenu.addItem(openFolderItem)
-        let openRecent = NSMenuItem(title: "Open Recent", action: nil, keyEquivalent: "")
-        let openRecentMenu = NSMenu(title: "Open Recent")
-        openRecentMenu.addItem(withTitle: "Clear Menu", action: #selector(NSDocumentController.clearRecentDocuments(_:)), keyEquivalent: "")
-        openRecent.submenu = openRecentMenu
-        fileMenu.addItem(openRecent)
+        // Note: macOS auto-injects the "Open Recent" submenu (with the clock
+        // glyph) when the app declares document types in Info.plist and has
+        // standard NSDocumentController actions wired above. We don't add a
+        // second one manually here — doing so produced a duplicate item.
         fileMenu.addItem(NSMenuItem.separator())
         let close = NSMenuItem(title: "Close", action: #selector(closeActiveTab(_:)), keyEquivalent: "w")
         close.target = self

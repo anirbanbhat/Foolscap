@@ -353,7 +353,7 @@ final class WorkspaceWindowController: NSWindowController, NSOutlineViewDataSour
 
         let icon = NSImageView()
         icon.translatesAutoresizingMaskIntoConstraints = false
-        let image = NSWorkspace.shared.icon(forFile: node.url.path)
+        let image = FileIcon.icon(for: node.url, isDirectory: node.isDirectory)
         image.size = NSSize(width: 16, height: 16)
         icon.image = image
 

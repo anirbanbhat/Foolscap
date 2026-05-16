@@ -21,6 +21,16 @@ if [ -d "$ROOT/doc" ]; then
     cp -R "$ROOT/doc" "$RES_DIR/doc"
 fi
 
+if [ -f "$ROOT/Scripts/generate-icon.swift" ]; then
+    echo ">> Building app icon"
+    ICONMAKER="$ROOT/build/iconmaker"
+    ICONSET_DIR="$ROOT/build/AppIcon.iconset"
+    xcrun swiftc -framework AppKit -framework Foundation \
+        -o "$ICONMAKER" "$ROOT/Scripts/generate-icon.swift"
+    "$ICONMAKER" "$ICONSET_DIR"
+    iconutil -c icns "$ICONSET_DIR" -o "$RES_DIR/AppIcon.icns"
+fi
+
 # Gather all .swift sources (portable; macOS ships bash 3.2 without mapfile)
 SOURCES=()
 while IFS= read -r f; do
