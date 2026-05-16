@@ -22,6 +22,7 @@ language pop-up on the left side of the editor's status bar.
 | C++ | `.cpp`, `.cxx`, `.cc`, `.hpp`, `.hxx`, `.hh` |
 | Go | `.go` |
 | Rust | `.rs` |
+| Java | `.java` |
 
 If the extension doesn't match anything, Foolscap uses **Plain Text** mode and
 draws everything in the standard text colour.

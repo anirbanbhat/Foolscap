@@ -195,7 +195,63 @@ final class WorkspaceWindowController: NSWindowController, NSOutlineViewDataSour
     // Called by WorkspaceFile after edit/save.
     func fileDidChangeEditedState(_ file: WorkspaceFile) {
         guard let item = fileItemMap[ObjectIdentifier(file)] else { return }
-        item.label = (file.isEdited ? "• " : "") + file.editorTitle
+        let pin = file.isPinned ? "● " : ""
+        let dirty = file.isEdited ? "• " : ""
+        item.label = pin + dirty + file.editorTitle
+    }
+
+    // MARK: Pin + reorder
+
+    @IBAction func togglePinActiveTab(_ sender: Any?) {
+        guard let item = tabView.selectedTabViewItem,
+              let container = item.viewController as? TabContainerViewController,
+              let file = container.file else { NSSound.beep(); return }
+        file.isPinned.toggle()
+        fileDidChangeEditedState(file)
+        resortTabsKeepingSelection()
+    }
+
+    @IBAction func moveActiveTabLeft(_ sender: Any?) {
+        guard let item = tabView.selectedTabViewItem else { return }
+        let idx = tabView.indexOfTabViewItem(item)
+        guard idx > 0 else { NSSound.beep(); return }
+        let leftItem = tabView.tabViewItems[idx - 1]
+        if pinState(of: leftItem) && !pinState(of: item) {
+            NSSound.beep(); return   // can't cross into pinned zone
+        }
+        tabView.removeTabViewItem(item)
+        tabView.insertTabViewItem(item, at: idx - 1)
+        tabView.selectTabViewItem(item)
+    }
+
+    @IBAction func moveActiveTabRight(_ sender: Any?) {
+        guard let item = tabView.selectedTabViewItem else { return }
+        let idx = tabView.indexOfTabViewItem(item)
+        guard idx < tabView.numberOfTabViewItems - 1 else { NSSound.beep(); return }
+        let rightItem = tabView.tabViewItems[idx + 1]
+        if pinState(of: item) && !pinState(of: rightItem) {
+            NSSound.beep(); return   // a pinned tab can't move past its boundary
+        }
+        tabView.removeTabViewItem(item)
+        tabView.insertTabViewItem(item, at: idx + 1)
+        tabView.selectTabViewItem(item)
+    }
+
+    private func pinState(of item: NSTabViewItem) -> Bool {
+        guard let c = item.viewController as? TabContainerViewController, let f = c.file else { return false }
+        return f.isPinned
+    }
+
+    private func resortTabsKeepingSelection() {
+        let items = tabView.tabViewItems
+        let pinned = items.filter { pinState(of: $0) }
+        let unpinned = items.filter { !pinState(of: $0) }
+        let newOrder = pinned + unpinned
+        if newOrder.map({ ObjectIdentifier($0) }) == items.map({ ObjectIdentifier($0) }) { return }
+        let selected = tabView.selectedTabViewItem
+        for item in items { tabView.removeTabViewItem(item) }
+        for item in newOrder { tabView.addTabViewItem(item) }
+        if let selected = selected { tabView.selectTabViewItem(selected) }
     }
 
     func fileDidSave(_ file: WorkspaceFile) {

@@ -49,6 +49,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: Workspace actions
 
+    private var diffWindows: [NSWindowController] = []
+
+    @IBAction func toggleTailMode(_ sender: Any?) {
+        // Only applies to a standalone Document window (the typical "open a
+        // log file" case). No-op otherwise.
+        guard let doc = NSDocumentController.shared.currentDocument as? Document else {
+            NSSound.beep(); return
+        }
+        doc.isTailing.toggle()
+        doc.editorViewController?.setReadOnly(doc.isTailing)
+        if doc.isTailing {
+            doc.editorViewController?.scrollToEnd()
+        }
+        if let menu = sender as? NSMenuItem {
+            menu.state = doc.isTailing ? .on : .off
+        }
+    }
+
+    @IBAction func compareTwoFiles(_ sender: Any?) {
+        let leftPanel = NSOpenPanel()
+        leftPanel.message = "Choose the LEFT file"
+        leftPanel.allowsMultipleSelection = false
+        leftPanel.canChooseDirectories = false
+        guard leftPanel.runModal() == .OK, let left = leftPanel.url else { return }
+
+        let rightPanel = NSOpenPanel()
+        rightPanel.message = "Choose the RIGHT file"
+        rightPanel.allowsMultipleSelection = false
+        rightPanel.canChooseDirectories = false
+        guard rightPanel.runModal() == .OK, let right = rightPanel.url else { return }
+
+        let vc = DiffViewController(left: left, right: right)
+        let win = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1100, height: 720),
+            styleMask: [.titled, .closable, .resizable, .miniaturizable],
+            backing: .buffered,
+            defer: false
+        )
+        win.title = "Diff: \(left.lastPathComponent) ↔ \(right.lastPathComponent)"
+        win.contentViewController = vc
+        let wc = NSWindowController(window: win)
+        wc.showWindow(nil)
+        diffWindows.append(wc)
+    }
+
     @IBAction func openFolder(_ sender: Any?) {
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
@@ -129,6 +174,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    @IBAction func toggleActiveTabPin(_ sender: Any?) {
+        if let wc = NSApp.keyWindow?.windowController as? WorkspaceWindowController {
+            wc.togglePinActiveTab(sender)
+        } else { NSSound.beep() }
+    }
+
+    @IBAction func moveTabLeftAction(_ sender: Any?) {
+        if let wc = NSApp.keyWindow?.windowController as? WorkspaceWindowController {
+            wc.moveActiveTabLeft(sender)
+        } else { NSSound.beep() }
+    }
+
+    @IBAction func moveTabRightAction(_ sender: Any?) {
+        if let wc = NSApp.keyWindow?.windowController as? WorkspaceWindowController {
+            wc.moveActiveTabRight(sender)
+        } else { NSSound.beep() }
+    }
+
+    @IBAction func selectTheme(_ sender: Any?) {
+        guard let item = sender as? NSMenuItem, let id = item.representedObject as? String,
+              let theme = ThemeRegistry.theme(withID: id) else { return }
+        ThemeRegistry.setCurrent(theme)
+        SyntaxHighlighter.invalidateRuleCache()
+        // Update checkmarks
+        if let parent = item.menu {
+            for sibling in parent.items { sibling.state = (sibling === item) ? .on : .off }
+        }
+    }
+
     @IBAction func closeSplit(_ sender: Any?) {
         if let wc = NSApp.keyWindow?.windowController as? WorkspaceWindowController {
             wc.unsplitCurrentTab(sender)
@@ -190,6 +264,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         fileMenu.addItem(saveAs)
         fileMenu.addItem(withTitle: "Revert to Saved", action: #selector(NSDocument.revertToSaved(_:)), keyEquivalent: "")
         fileMenu.addItem(NSMenuItem.separator())
+        let compareItem = NSMenuItem(title: "Compare Two Files…", action: #selector(compareTwoFiles(_:)), keyEquivalent: "")
+        compareItem.target = self
+        fileMenu.addItem(compareItem)
+        let tailItem = NSMenuItem(title: "Tail Mode (Follow File)", action: #selector(toggleTailMode(_:)), keyEquivalent: "t")
+        tailItem.keyEquivalentModifierMask = [.command, .shift]
+        tailItem.target = self
+        fileMenu.addItem(tailItem)
+        fileMenu.addItem(NSMenuItem.separator())
         fileMenu.addItem(withTitle: "Page Setup…", action: #selector(NSDocument.runPageLayout(_:)), keyEquivalent: "P")
         fileMenu.addItem(withTitle: "Print…", action: #selector(NSDocument.printDocument(_:)), keyEquivalent: "p")
 
@@ -240,6 +322,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let gotoLine = NSMenuItem(title: "Go to Line…", action: #selector(EditorViewController.gotoLine(_:)), keyEquivalent: "l")
         editMenu.addItem(gotoLine)
+
+        let toggleComment = NSMenuItem(title: "Toggle Line Comment", action: #selector(EditorViewController.toggleLineComment(_:)), keyEquivalent: "/")
+        toggleComment.keyEquivalentModifierMask = [.command]
+        editMenu.addItem(toggleComment)
+
+        let cursorBack = NSMenuItem(title: "Navigate Back", action: #selector(EditorViewController.cursorBack(_:)), keyEquivalent: "-")
+        cursorBack.keyEquivalentModifierMask = [.control, .option]
+        editMenu.addItem(cursorBack)
+        let cursorForward = NSMenuItem(title: "Navigate Forward", action: #selector(EditorViewController.cursorForward(_:)), keyEquivalent: "=")
+        cursorForward.keyEquivalentModifierMask = [.control, .option]
+        editMenu.addItem(cursorForward)
 
         // Navigate submenu
         let navItem = NSMenuItem(title: "Navigate", action: nil, keyEquivalent: "")
@@ -364,6 +457,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         viewMenu.addItem(increaseFont)
         let decreaseFont = NSMenuItem(title: "Decrease Font Size", action: #selector(EditorViewController.decreaseFontSize(_:)), keyEquivalent: "-")
         viewMenu.addItem(decreaseFont)
+        viewMenu.addItem(NSMenuItem.separator())
+        let toggleGuide = NSMenuItem(title: "Wrap Guide at Column 80", action: #selector(EditorViewController.toggleWrapGuide(_:)), keyEquivalent: "")
+        viewMenu.addItem(toggleGuide)
+        let setGuide = NSMenuItem(title: "Set Wrap Guide Column…", action: #selector(EditorViewController.setWrapGuideColumn(_:)), keyEquivalent: "")
+        viewMenu.addItem(setGuide)
+        viewMenu.addItem(NSMenuItem.separator())
+        let foldHere = NSMenuItem(title: "Fold at Current Line", action: #selector(EditorViewController.foldAtCurrentLine(_:)), keyEquivalent: ".")
+        foldHere.keyEquivalentModifierMask = [.command, .option]
+        viewMenu.addItem(foldHere)
+        viewMenu.addItem(withTitle: "Fold All", action: #selector(EditorViewController.foldAll(_:)), keyEquivalent: "")
+        viewMenu.addItem(withTitle: "Unfold All", action: #selector(EditorViewController.unfoldAll(_:)), keyEquivalent: "")
+
+        // Theme menu
+        let themeItem = NSMenuItem()
+        mainMenu.addItem(themeItem)
+        let themeMenu = NSMenu(title: "Theme")
+        themeItem.submenu = themeMenu
+        for t in ThemeRegistry.all {
+            let item = NSMenuItem(title: t.displayName, action: #selector(selectTheme(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = t.id
+            item.state = (t.id == ThemeRegistry.current.id) ? .on : .off
+            themeMenu.addItem(item)
+        }
 
         // Syntax menu
         let syntaxItem = NSMenuItem()
@@ -392,6 +509,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mruBack.keyEquivalentModifierMask = [.control, .shift]
         mruBack.target = self
         windowMenu.addItem(mruBack)
+        windowMenu.addItem(NSMenuItem.separator())
+        let pinItem = NSMenuItem(title: "Pin / Unpin Tab", action: #selector(toggleActiveTabPin(_:)), keyEquivalent: "")
+        pinItem.target = self
+        windowMenu.addItem(pinItem)
+        let moveLeft = NSMenuItem(title: "Move Tab Left", action: #selector(moveTabLeftAction(_:)), keyEquivalent: "[")
+        moveLeft.keyEquivalentModifierMask = [.control, .shift]
+        moveLeft.target = self
+        windowMenu.addItem(moveLeft)
+        let moveRight = NSMenuItem(title: "Move Tab Right", action: #selector(moveTabRightAction(_:)), keyEquivalent: "]")
+        moveRight.keyEquivalentModifierMask = [.control, .shift]
+        moveRight.target = self
+        windowMenu.addItem(moveRight)
         windowMenu.addItem(NSMenuItem.separator())
         windowMenu.addItem(withTitle: "Bring All to Front", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: "")
         NSApp.windowsMenu = windowMenu

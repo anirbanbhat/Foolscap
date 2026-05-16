@@ -14,6 +14,13 @@ registerSymbolExtractorTests()
 registerFileIndexTests()
 registerIndentSettingsTests()
 registerWorkspaceFileSaveTests()
+registerCommentToggleTests()
+registerCursorHistoryTests()
+registerSnippetEngineTests()
+registerDiffEngineTests()
+registerCodeFolderTests()
+registerThemeRegistryTests()
+registerJavaSyntaxTests()
 
 // Run.
 var passed = 0

@@ -18,6 +18,7 @@ enum SyntaxHighlighter {
         case cpp
         case go
         case rust
+        case java
 
         var displayName: String {
             switch self {
@@ -36,37 +37,12 @@ enum SyntaxHighlighter {
             case .cpp: return "C++"
             case .go: return "Go"
             case .rust: return "Rust"
+            case .java: return "Java"
             }
         }
     }
 
-    struct Theme {
-        let text: NSColor
-        let keyword: NSColor
-        let string: NSColor
-        let number: NSColor
-        let comment: NSColor
-        let typeName: NSColor
-        let decorator: NSColor
-        let punctuation: NSColor
-        let heading: NSColor
-        let tag: NSColor
-        let attr: NSColor
-
-        static let `default` = Theme(
-            text: NSColor.textColor,
-            keyword: NSColor.systemPink,
-            string: NSColor.systemRed,
-            number: NSColor.systemOrange,
-            comment: NSColor.systemGreen,
-            typeName: NSColor.systemTeal,
-            decorator: NSColor.systemPurple,
-            punctuation: NSColor.secondaryLabelColor,
-            heading: NSColor.systemBlue,
-            tag: NSColor.systemBlue,
-            attr: NSColor.systemPurple
-        )
-    }
+    // Theme is now defined in Theme.swift and selected via ThemeRegistry.current.
 
     struct Rule {
         let regex: NSRegularExpression
@@ -100,13 +76,20 @@ enum SyntaxHighlighter {
         case "cpp", "cxx", "cc", "hpp", "hxx", "hh": return .cpp
         case "go": return .go
         case "rs": return .rust
+        case "java": return .java
         default: return .plain
         }
     }
 
     private static var ruleCache: [Language: [Rule]] = [:]
 
-    static func rules(for lang: Language, theme: Theme = .default) -> [Rule] {
+    /// Clear the rule cache. Call when the active theme changes so rule
+    /// colours are re-derived from the new palette.
+    static func invalidateRuleCache() {
+        ruleCache.removeAll()
+    }
+
+    static func rules(for lang: Language, theme: Theme = ThemeRegistry.current) -> [Rule] {
         if let cached = ruleCache[lang] { return cached }
         let rules: [Rule]
         switch lang {
@@ -257,6 +240,19 @@ enum SyntaxHighlighter {
                 Rule(#"\b\d+(\.\d+)?\b"#, theme.number),
                 Rule(#"'[a-z_][a-z0-9_]*"#, theme.decorator),
             ]
+        case .java:
+            rules = [
+                Rule(#"/\*[\s\S]*?\*/"#, theme.comment, multiline: true),
+                Rule(#""""[\s\S]*?""""#, theme.string, multiline: true),
+                Rule(#"\b(abstract|assert|boolean|break|byte|case|catch|char|class|const|continue|default|do|double|else|enum|extends|final|finally|float|for|goto|if|implements|import|instanceof|int|interface|long|native|new|package|private|protected|public|return|short|static|strictfp|super|switch|synchronized|this|throw|throws|transient|try|void|volatile|while|true|false|null|var|yield|sealed|permits|record)\b"#, theme.keyword, bold: true),
+                Rule(#""(?:\\.|[^"\\\n])*""#, theme.string),
+                Rule(#"'(?:\\.|[^'\\\n])'"#, theme.string),
+                Rule(#"//[^\n]*"#, theme.comment),
+                Rule(#"@[A-Za-z_][A-Za-z0-9_]*"#, theme.decorator),
+                Rule(#"\b\d+(\.\d+)?[fFdDlL]?\b"#, theme.number),
+                Rule(#"\b0x[0-9a-fA-F]+[Ll]?\b"#, theme.number),
+                Rule(#"\b[A-Z][A-Za-z0-9_]*\b"#, theme.typeName),
+            ]
         }
         ruleCache[lang] = rules
         return rules
@@ -291,7 +287,7 @@ enum SyntaxHighlighter {
 
     static func highlight(_ storage: NSTextStorage, range: NSRange, language: Language, font: NSFont) {
         let baseAttrs: [NSAttributedString.Key: Any] = [
-            .foregroundColor: Theme.default.text,
+            .foregroundColor: ThemeRegistry.current.text,
             .font: font
         ]
         storage.setAttributes(baseAttrs, range: range)

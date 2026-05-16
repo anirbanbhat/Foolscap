@@ -22,6 +22,29 @@
 | Cut / Copy / Paste | ⌘X / ⌘C / ⌘V |
 | Select All | ⌘A |
 
+## Comment + navigation
+
+| Action | Shortcut |
+|---|---|
+| Toggle Line Comment | ⌘/ |
+| Navigate Back (cursor history) | ⌃⌥− |
+| Navigate Forward | ⌃⌥= |
+
+## Tabs
+
+| Action | Shortcut |
+|---|---|
+| Pin / Unpin Tab | (menu) |
+| Move Tab Left | ⌃⇧[ |
+| Move Tab Right | ⌃⇧] |
+
+## Files
+
+| Action | Shortcut |
+|---|---|
+| Compare Two Files… | (menu) |
+| Tail Mode (Follow File) | ⇧⌘T |
+
 ## Find & navigation
 
 | Action | Shortcut |
@@ -70,6 +93,10 @@ Tabs → Spaces, and Spaces → Tabs (no default shortcuts).
 | Auto-Close Brackets toggle | (menu) |
 | Split Editor | ⌘\\ |
 | Close Split | ⇧⌘\\ |
+| Wrap Guide at Column 80 | (menu) |
+| Set Wrap Guide Column… | (menu) |
+| Fold at Current Line | ⌥⌘. |
+| Fold All / Unfold All | (menu) |
 | Increase font | ⌘+ |
 | Decrease font | ⌘− |
 
