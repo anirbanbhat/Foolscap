@@ -27,7 +27,7 @@ jobs:
     runs-on: macos-latest
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Select Xcode
         run: |
@@ -52,7 +52,7 @@ jobs:
 
     steps:
       - name: Check out source (full history for tag lookup)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
