@@ -26,8 +26,13 @@ final class TabContainerViewController: NSViewController {
     required init?(coder: NSCoder) { fatalError() }
 
     override func loadView() {
-        let container = NSView()
-        container.translatesAutoresizingMaskIntoConstraints = false
+        // NSTabView sizes the tab content view via autoresizing-mask on
+        // macOS Tahoe — it does not install Auto Layout constraints on
+        // tAMIC=false content views. So the top-level container has
+        // tAMIC=true with [.width, .height] to follow the tab content
+        // area, while everything inside it uses Auto Layout.
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+        container.autoresizingMask = [.width, .height]
         self.view = container
         addPrimaryEditor()
     }
