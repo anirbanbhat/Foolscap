@@ -61,7 +61,11 @@ final class EditorViewController: NSViewController, NSTextStorageDelegate, NSTex
 
     override func loadView() {
         let root = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 650))
-        root.autoresizingMask = [.width, .height]
+        // Use Auto Layout exclusively — mixing autoresizingMask with the
+        // explicit edge constraints below caused AppKit to silently break
+        // one of them when this view was added as an NSSplitView arranged
+        // subview, collapsing the root to ~24 px (just the status bar).
+        root.translatesAutoresizingMaskIntoConstraints = false
 
         scrollView = NSScrollView()
         scrollView.translatesAutoresizingMaskIntoConstraints = false
