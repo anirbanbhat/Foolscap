@@ -208,13 +208,37 @@ final class TabButton: NSView {
         onClose?(index)
     }
 
+    /// NSTextField (even in label mode) hit-tests itself, so without this
+    /// override clicks on the file name never reach our mouseDown. Claim
+    /// the whole button area for ourselves; defer to closeButton only when
+    /// the click actually lands on it.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let local = convert(point, from: superview)
+        guard bounds.contains(local) else { return nil }
+        if !closeButton.isHidden && closeButton.frame.contains(local) {
+            return closeButton
+        }
+        return self
+    }
+
+    /// Accept clicks even when the window isn't main — same as native tabs.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
     override func mouseDown(with event: NSEvent) {
         onClick?(index)
     }
 
+    /// Use the menu(for:) hook so AppKit also presents the menu on
+    /// Control-click and on right-click via the trackpad / accessibility.
+    override func menu(for event: NSEvent) -> NSMenu? {
+        return onRequestMenu?(index)
+    }
+
     override func rightMouseDown(with event: NSEvent) {
-        if let menu = onRequestMenu?(index) {
-            NSMenu.popUpContextMenu(menu, with: event, for: self)
+        if let m = onRequestMenu?(index) {
+            NSMenu.popUpContextMenu(m, with: event, for: self)
+        } else {
+            super.rightMouseDown(with: event)
         }
     }
 
