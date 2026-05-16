@@ -76,7 +76,9 @@ final class WorkspaceWindowController: NSWindowController, NSOutlineViewDataSour
         let tabContainer = NSView()
         tabContainer.translatesAutoresizingMaskIntoConstraints = false
 
-        tabView = NSTabView()
+        let workspaceTabs = WorkspaceTabView()
+        workspaceTabs.workspaceController = self
+        tabView = workspaceTabs
         tabView.tabViewType = .topTabsBezelBorder
         tabView.translatesAutoresizingMaskIntoConstraints = false
         tabView.delegate = self
@@ -100,7 +102,16 @@ final class WorkspaceWindowController: NSWindowController, NSOutlineViewDataSour
 
         splitView.addArrangedSubview(sidebarScroll)
         splitView.addArrangedSubview(tabContainer)
-        splitView.setHoldingPriority(.defaultLow + 1, forSubviewAt: 1)
+        // Sidebar resists being shrunk by tab-strip growth; tab area expands.
+        splitView.setHoldingPriority(NSLayoutConstraint.Priority(260), forSubviewAt: 0)
+        splitView.setHoldingPriority(.defaultLow, forSubviewAt: 1)
+
+        // Sidebar has a hard floor / ceiling so a runaway tab strip can't
+        // eat the file panel.
+        NSLayoutConstraint.activate([
+            sidebarScroll.widthAnchor.constraint(greaterThanOrEqualToConstant: 180),
+            sidebarScroll.widthAnchor.constraint(lessThanOrEqualToConstant: 420),
+        ])
 
         let content = NSView()
         content.addSubview(splitView)
@@ -198,6 +209,127 @@ final class WorkspaceWindowController: NSWindowController, NSOutlineViewDataSour
         let pin = file.isPinned ? "● " : ""
         let dirty = file.isEdited ? "• " : ""
         item.label = pin + dirty + file.editorTitle
+    }
+
+    // MARK: Right-click context menu
+
+    private var contextMenuTargetItem: NSTabViewItem?
+
+    func contextMenu(forTab item: NSTabViewItem) -> NSMenu {
+        contextMenuTargetItem = item
+        let menu = NSMenu()
+        menu.addItem(withTitle: "Close", action: #selector(ctxCloseTab(_:)), keyEquivalent: "")
+        menu.addItem(withTitle: "Close Other Tabs", action: #selector(ctxCloseOtherTabs(_:)), keyEquivalent: "")
+        menu.addItem(withTitle: "Close Tabs to the Left", action: #selector(ctxCloseLeftTabs(_:)), keyEquivalent: "")
+        menu.addItem(withTitle: "Close Tabs to the Right", action: #selector(ctxCloseRightTabs(_:)), keyEquivalent: "")
+        menu.addItem(withTitle: "Close All Tabs", action: #selector(ctxCloseAllTabs(_:)), keyEquivalent: "")
+        menu.addItem(NSMenuItem.separator())
+        let pinTitle: String
+        if let container = item.viewController as? TabContainerViewController,
+           let file = container.file, file.isPinned {
+            pinTitle = "Unpin Tab"
+        } else {
+            pinTitle = "Pin Tab"
+        }
+        menu.addItem(withTitle: pinTitle, action: #selector(ctxTogglePin(_:)), keyEquivalent: "")
+        for item in menu.items { item.target = self }
+        return menu
+    }
+
+    @objc private func ctxCloseTab(_ sender: Any?) {
+        guard let item = contextMenuTargetItem else { return }
+        contextMenuTargetItem = nil
+        closeTab(item)
+    }
+
+    @objc private func ctxCloseOtherTabs(_ sender: Any?) {
+        guard let target = contextMenuTargetItem else { return }
+        contextMenuTargetItem = nil
+        let others = tabView.tabViewItems.filter { $0 !== target }
+        for item in others { closeTab(item) }
+    }
+
+    @objc private func ctxCloseLeftTabs(_ sender: Any?) {
+        guard let target = contextMenuTargetItem else { return }
+        contextMenuTargetItem = nil
+        let targetIdx = tabView.indexOfTabViewItem(target)
+        let lefts = (0..<targetIdx).map { tabView.tabViewItems[$0] }
+        for item in lefts { closeTab(item) }
+    }
+
+    @objc private func ctxCloseRightTabs(_ sender: Any?) {
+        guard let target = contextMenuTargetItem else { return }
+        contextMenuTargetItem = nil
+        let targetIdx = tabView.indexOfTabViewItem(target)
+        let count = tabView.numberOfTabViewItems
+        guard targetIdx + 1 < count else { return }
+        let rights = ((targetIdx + 1)..<count).map { tabView.tabViewItems[$0] }
+        for item in rights { closeTab(item) }
+    }
+
+    @objc private func ctxCloseAllTabs(_ sender: Any?) {
+        contextMenuTargetItem = nil
+        let all = tabView.tabViewItems
+        for item in all { closeTab(item) }
+    }
+
+    @objc private func ctxTogglePin(_ sender: Any?) {
+        guard let item = contextMenuTargetItem,
+              let container = item.viewController as? TabContainerViewController,
+              let file = container.file else {
+            contextMenuTargetItem = nil; return
+        }
+        contextMenuTargetItem = nil
+        file.isPinned.toggle()
+        fileDidChangeEditedState(file)
+        resortTabsKeepingSelection()
+    }
+
+    /// Close a specific tab, prompting if it has unsaved changes.
+    private func closeTab(_ item: NSTabViewItem) {
+        guard let container = item.viewController as? TabContainerViewController,
+              let file = container.file else { return }
+        if file.isEdited {
+            let alert = NSAlert()
+            alert.messageText = "Save changes to \(file.url.lastPathComponent)?"
+            alert.informativeText = "Your changes will be lost if you don't save them."
+            alert.addButton(withTitle: "Save")
+            alert.addButton(withTitle: "Discard")
+            alert.addButton(withTitle: "Cancel")
+            let r = alert.runModal()
+            if r == .alertFirstButtonReturn {
+                do { try file.save() }
+                catch { NSAlert(error: error).runModal(); return }
+            } else if r == .alertThirdButtonReturn {
+                return
+            }
+        }
+        let idx = tabView.indexOfTabViewItem(item)
+        tabView.removeTabViewItem(item)
+        fileItemMap.removeValue(forKey: ObjectIdentifier(file))
+        openFiles.removeAll { $0 === file }
+        rebuildMRU(removingIndex: idx)
+        updateEmptyHint()
+    }
+
+    // MARK: Sequential tab navigation
+
+    @IBAction func selectNextTab(_ sender: Any?) {
+        let count = tabView.numberOfTabViewItems
+        guard count > 1 else { NSSound.beep(); return }
+        let cur = tabView.selectedTabViewItem.flatMap { tabView.indexOfTabViewItem($0) } ?? -1
+        let next = (cur + 1) % count
+        tabView.selectTabViewItem(at: next)
+        bumpMRU(forIndex: next)
+    }
+
+    @IBAction func selectPreviousTab(_ sender: Any?) {
+        let count = tabView.numberOfTabViewItems
+        guard count > 1 else { NSSound.beep(); return }
+        let cur = tabView.selectedTabViewItem.flatMap { tabView.indexOfTabViewItem($0) } ?? 0
+        let prev = (cur - 1 + count) % count
+        tabView.selectTabViewItem(at: prev)
+        bumpMRU(forIndex: prev)
     }
 
     // MARK: Pin + reorder
