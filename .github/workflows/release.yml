@@ -1,53 +1,93 @@
 name: Release
 
-# Triggered on a version tag push (e.g. `v0.1.0`) or manually.
+# Fires on:
+#   - push to `main`  → tests pass, then a new minor version is cut
+#                       automatically (v0.1.0 → v0.2.0 → v0.3.0 …)
+#   - tag push `v*`   → cut a release at that exact tag
+#   - manual dispatch → cut a release at the version you pass in
 #
-# To cut a release:
-#   git tag v0.1.0
-#   git push origin v0.1.0
-#
-# The workflow builds Foolscap.app, packs it into a .dmg, runs the test
-# suite, and attaches the .dmg to a GitHub release.
+# To skip auto-release on a particular main commit, include `[skip release]`
+# anywhere in the commit message.
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version tag (e.g. v0.1.0). Required when running manually.'
-        required: true
-        default: 'v0.0.0'
+        description: 'Version tag (e.g. v0.1.0). Leave blank to auto-bump the minor.'
+        required: false
+        default: ''
 
 jobs:
-  release:
+  test:
     runs-on: macos-latest
-
-    permissions:
-      contents: write   # Needed to create a GitHub release and upload assets.
-
     steps:
       - name: Check out source
         uses: actions/checkout@v4
 
       - name: Select Xcode
         run: |
-          # Use the newest Xcode the runner image provides.
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)/Contents/Developer"
+          swift --version
+
+      - name: Run tests
+        run: ./test.sh
+
+  release:
+    needs: test
+    if: |
+      !contains(github.event.head_commit.message, '[skip release]')
+      && (
+        (github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')))
+        || github.event_name == 'workflow_dispatch'
+      )
+    runs-on: macos-latest
+
+    permissions:
+      contents: write   # Needed to create a GitHub release and upload assets.
+
+    steps:
+      - name: Check out source (full history for tag lookup)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Select Xcode
+        run: |
           sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)/Contents/Developer"
           swift --version
 
       - name: Resolve version
         id: version
         run: |
-          if [ -n "${{ github.event.inputs.version }}" ]; then
-            echo "tag=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Run tests
-        run: ./test.sh
+          set -euo pipefail
+          case "${GITHUB_EVENT_NAME}" in
+            workflow_dispatch)
+              IN="${{ github.event.inputs.version }}"
+              if [ -n "${IN}" ]; then
+                VERSION="${IN}"
+              else
+                VERSION="$(./.github/scripts/next-minor.sh)"
+              fi
+              ;;
+            push)
+              if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+                VERSION="${GITHUB_REF_NAME}"
+              else
+                VERSION="$(./.github/scripts/next-minor.sh)"
+              fi
+              ;;
+            *)
+              echo "Unsupported event: ${GITHUB_EVENT_NAME}" >&2
+              exit 1
+              ;;
+          esac
+          echo "Resolved version: ${VERSION}"
+          echo "tag=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Build app
         run: ./build.sh
@@ -57,13 +97,11 @@ jobs:
           set -euo pipefail
           rm -rf dmg-staging
           mkdir -p dmg-staging
-          # The build script produces a lowercase bundle; give it the
-          # display-friendly name inside the disk image.
           cp -R build/foolscap.app "dmg-staging/Foolscap.app"
-          # Drag-to-/Applications shortcut inside the .dmg.
           ln -s /Applications dmg-staging/Applications
 
       - name: Create .dmg
+        id: dmg
         run: |
           set -euo pipefail
           VERSION="${{ steps.version.outputs.tag }}"
@@ -75,31 +113,16 @@ jobs:
             -format UDZO \
             "${DMG_NAME}"
           shasum -a 256 "${DMG_NAME}" | tee "${DMG_NAME}.sha256"
-          echo "DMG_NAME=${DMG_NAME}" >> "$GITHUB_ENV"
+          echo "dmg_name=${DMG_NAME}" >> "$GITHUB_OUTPUT"
 
       - name: Write release notes
         run: |
           VERSION="${{ steps.version.outputs.tag }}"
+          DMG_NAME="${{ steps.dmg.outputs.dmg_name }}"
           {
             echo "# Foolscap ${VERSION}"
             echo
             echo "Native macOS text and code editor in the spirit of Notepad++ — pure AppKit/Swift, no Electron."
-            echo
-            echo "## Highlights"
-            echo
-            echo "- **Tabbed editing** in two modes: single-file (native macOS window tabs) and workspace (sidebar + in-window tabs)."
-            echo "- **Find** in current buffer and **Find in Workspace** with regex + case sensitivity."
-            echo "- **Syntax highlighting** for Swift, Python, JavaScript, JSON, Markdown, HTML, CSS, YAML, XML, shell, C, C++, Go, Rust, plain text."
-            echo "- **Quick navigation**: ⌘P jumps to any file in the workspace; ⌘R jumps to any symbol in the current buffer."
-            echo "- **Smart editing**: auto-close brackets/quotes, word autocomplete from the buffer (⌥ESC), bracket matching, occurrence highlight."
-            echo "- **EditorConfig** support — \`indent_style\`, \`indent_size\`, \`end_of_line\`, \`charset\`, \`trim_trailing_whitespace\`, \`insert_final_newline\` applied on open and save."
-            echo "- **Split editor** (⌘\\\\) — same buffer in two side-by-side panes with independent cursors and scroll positions."
-            echo "- **Minimap** (⌥⌘M), **indent guides** (⇧⌘I), **show invisibles** (⇧⌘U)."
-            echo "- **Line operations**: duplicate (⇧⌘D), delete (⇧⌘K), move (⌥↑/↓), sort, trim trailing whitespace."
-            echo "- **Bookmarks** (⌘F2 / F2 / ⇧F2) and **mark-all** (⇧⌘M) in the gutter."
-            echo "- **Change-history stripes** in the gutter — orange for unsaved, green for saved-modified."
-            echo "- **Goto Line** (⌘L), case conversion, Base64/URL/HTML encode-decode."
-            echo "- **In-app user guide** under Help (⌘?)."
             echo
             echo "## Install"
             echo
@@ -113,7 +136,7 @@ jobs:
             echo
             echo "The build is ad-hoc signed only — it is not notarized. Apple's Gatekeeper warning is expected until/unless the app is signed with a paid Developer ID."
             echo
-            echo "## Verifying the download"
+            echo "## Verify the download"
             echo
             echo "\`\`\`sh"
             echo "shasum -a 256 ${DMG_NAME}"

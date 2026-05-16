@@ -178,4 +178,4 @@ short list:
 
 ## License
 
-TBD.
+[MIT](LICENSE) — Copyright (c) 2026 Anirban Bhattacherji.
