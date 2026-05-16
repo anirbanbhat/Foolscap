@@ -170,6 +170,11 @@ final class Document: NSDocument, EditingHost {
         }
     }
 
+    /// Tail-mode flag. When true the document silently reloads on every disk
+    /// change and the editor scrolls to the bottom — the classic `tail -f`
+    /// behaviour. Editing is disabled while tailing.
+    var isTailing: Bool = false
+
     private func handleExternalChange() {
         guard let url = fileURL else { return }
         let fm = FileManager.default
@@ -177,6 +182,12 @@ final class Document: NSDocument, EditingHost {
               let diskDate = attrs[.modificationDate] as? Date else { return }
         let knownDate = fileModificationDate ?? .distantPast
         guard diskDate > knownDate else { return }
+
+        if isTailing {
+            try? revert(toContentsOf: url, ofType: fileType ?? "public.plain-text")
+            editorViewController?.scrollToEnd()
+            return
+        }
 
         if !isDocumentEdited {
             try? revert(toContentsOf: url, ofType: fileType ?? "public.plain-text")
@@ -191,7 +202,6 @@ final class Document: NSDocument, EditingHost {
         if alert.runModal() == .alertFirstButtonReturn {
             try? revert(toContentsOf: url, ofType: fileType ?? "public.plain-text")
         } else {
-            // Mark as edited so subsequent save overwrites disk version.
             updateChangeCount(.changeDone)
         }
     }

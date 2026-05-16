@@ -5,6 +5,10 @@ final class EditorTextView: NSTextView {
     var showIndentGuides: Bool = false {
         didSet { needsDisplay = true }
     }
+    /// Column at which to draw a vertical wrap-guide line; nil disables it.
+    var wrapGuideColumn: Int? {
+        didSet { needsDisplay = true }
+    }
     var indentSettings: IndentSettings = .default
     var autoCloseBrackets: Bool = true
 
@@ -72,8 +76,46 @@ final class EditorTextView: NSTextView {
         autoresizingMask = [.width]
     }
 
+    var snippetLanguage: SyntaxHighlighter.Language = .plain
+
     override func insertTab(_ sender: Any?) {
+        // Snippet expansion: if the word before the caret is a registered
+        // trigger for the active language, replace it with the expanded
+        // body. Otherwise fall through to normal indent insertion.
+        if tryExpandSnippet() { return }
         insertText(indentSettings.tabInsertion, replacementRange: selectedRange())
+    }
+
+    private func tryExpandSnippet() -> Bool {
+        let sel = selectedRange()
+        guard sel.length == 0, sel.location > 0 else { return false }
+        let ns = self.string as NSString
+        var start = sel.location
+        while start > 0 {
+            let c = ns.character(at: start - 1)
+            guard let scalar = UnicodeScalar(c) else { break }
+            if CharacterSet.alphanumerics.contains(scalar) || c == 0x5F {
+                start -= 1
+                continue
+            }
+            break
+        }
+        guard start < sel.location else { return false }
+        let trigger = ns.substring(with: NSRange(location: start, length: sel.location - start))
+        guard let snippet = SnippetEngine.snippet(trigger: trigger, in: snippetLanguage) else {
+            return false
+        }
+        let expanded = SnippetEngine.expand(snippet)
+        let replaceRange = NSRange(location: start, length: sel.location - start)
+        guard shouldChangeText(in: replaceRange, replacementString: expanded.text) else { return false }
+        replaceCharacters(in: replaceRange, with: expanded.text)
+        didChangeText()
+        if let stop = expanded.firstStopRange {
+            setSelectedRange(NSRange(location: start + stop.location, length: stop.length))
+        } else {
+            setSelectedRange(NSRange(location: start + (expanded.text as NSString).length, length: 0))
+        }
+        return true
     }
 
     override func insertNewline(_ sender: Any?) {
@@ -214,6 +256,7 @@ final class EditorTextView: NSTextView {
 
     override func drawBackground(in rect: NSRect) {
         super.drawBackground(in: rect)
+        drawWrapGuide(in: rect)
         guard showIndentGuides,
               let lm = layoutManager,
               let tc = textContainer,
@@ -267,5 +310,20 @@ final class EditorTextView: NSTextView {
             glyphIndex = NSMaxRange(lineGlyphRange)
             if lineGlyphRange.length == 0 { break }
         }
+    }
+
+    /// Single vertical guideline at the configured column.
+    private func drawWrapGuide(in rect: NSRect) {
+        guard let col = wrapGuideColumn, col > 0, let font = self.font else { return }
+        let charWidth = "x".size(withAttributes: [.font: font]).width
+        guard charWidth > 0.1 else { return }
+        let x = textContainerInset.width + CGFloat(col) * charWidth + 0.5
+        guard x >= rect.minX && x <= rect.maxX else { return }
+        NSColor.separatorColor.withAlphaComponent(0.6).setStroke()
+        let path = NSBezierPath()
+        path.lineWidth = 0.5
+        path.move(to: NSPoint(x: x, y: rect.minY))
+        path.line(to: NSPoint(x: x, y: rect.maxY))
+        path.stroke()
     }
 }

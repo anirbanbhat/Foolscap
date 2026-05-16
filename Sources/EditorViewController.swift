@@ -1,6 +1,6 @@
 import AppKit
 
-final class EditorViewController: NSViewController, NSTextStorageDelegate, NSTextViewDelegate {
+final class EditorViewController: NSViewController, NSTextStorageDelegate, NSTextViewDelegate, NSLayoutManagerDelegate {
 
     weak var host: EditingHost?
 
@@ -26,6 +26,14 @@ final class EditorViewController: NSViewController, NSTextStorageDelegate, NSTex
     private var markedLineStarts: Set<Int> = []
     private var markedText: String?    // current marked phrase, if any
 
+    let cursorHistory = CursorHistory()
+    private var suppressHistoryRecording = false
+
+    /// Code folding state. `availableFolds` is the result of running CodeFolder
+    /// over the current buffer; `foldedRanges` is the subset currently hidden.
+    private(set) var availableFolds: [CodeFolder.Fold] = []
+    private var foldedRanges: [NSRange] = []
+
     private let injectedStorage: NSTextStorage?
     private var minimapView: MinimapView?
     private var scrollTrailingConstraint: NSLayoutConstraint?
@@ -33,11 +41,22 @@ final class EditorViewController: NSViewController, NSTextStorageDelegate, NSTex
     init(textStorage: NSTextStorage? = nil) {
         self.injectedStorage = textStorage
         super.init(nibName: nil, bundle: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(themeChanged), name: .themeDidChange, object: nil)
     }
 
     required init?(coder: NSCoder) {
         self.injectedStorage = nil
         super.init(coder: coder)
+        NotificationCenter.default.addObserver(self, selector: #selector(themeChanged), name: .themeDidChange, object: nil)
+    }
+
+    deinit { NotificationCenter.default.removeObserver(self) }
+
+    @objc private func themeChanged() {
+        guard isViewLoaded else { return }
+        textView.backgroundColor = ThemeRegistry.current.background
+        textView.textColor = ThemeRegistry.current.text
+        rehighlightAll()
     }
 
     override func loadView() {
@@ -73,7 +92,10 @@ final class EditorViewController: NSViewController, NSTextStorageDelegate, NSTex
         if textView.textStorage?.delegate == nil {
             textView.textStorage?.delegate = self
         }
+        textView.layoutManager?.delegate = self
         textView.font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+        textView.backgroundColor = ThemeRegistry.current.background
+        textView.textColor = ThemeRegistry.current.text
 
         scrollView.documentView = textView
         scrollView.hasVerticalRuler = true
@@ -189,6 +211,7 @@ final class EditorViewController: NSViewController, NSTextStorageDelegate, NSTex
         suppressHighlight = false
         textView.indentSettings = host.indentSettings
         language = host.detectedLanguage
+        textView.snippetLanguage = host.detectedLanguage
         rehighlightAll()
         syncStatusBar()
         updateStatus()
@@ -212,6 +235,21 @@ final class EditorViewController: NSViewController, NSTextStorageDelegate, NSTex
 
     /// Called by the host when changes have been cleared (e.g. after a save).
     /// Transitions "modified" stripes → "saved" stripes.
+    /// Scroll to the very end of the buffer. Used by tail mode.
+    func scrollToEnd() {
+        guard isViewLoaded else { return }
+        let length = (textView.string as NSString).length
+        textView.setSelectedRange(NSRange(location: length, length: 0))
+        textView.scrollRangeToVisible(NSRange(location: length, length: 0))
+    }
+
+    /// Make the text view read-only (used by tail mode to prevent typing into
+    /// a buffer that's being rewritten under us).
+    func setReadOnly(_ readOnly: Bool) {
+        guard isViewLoaded else { return }
+        textView.isEditable = !readOnly
+    }
+
     func handleDocumentCleared() {
         savedLineStarts.formUnion(modifiedLineStarts)
         modifiedLineStarts.removeAll()
@@ -351,6 +389,9 @@ final class EditorViewController: NSViewController, NSTextStorageDelegate, NSTex
     func textViewDidChangeSelection(_ notification: Notification) {
         updateStatus()
         updateSelectionDecorations()
+        if !suppressHistoryRecording {
+            cursorHistory.recordCurrent(textView.selectedRange().location)
+        }
     }
 
     // MARK: Selection decorations
@@ -481,6 +522,33 @@ final class EditorViewController: NSViewController, NSTextStorageDelegate, NSTex
         textView.needsDisplay = true
     }
 
+    @IBAction func toggleWrapGuide(_ sender: Any?) {
+        if textView.wrapGuideColumn == nil {
+            textView.wrapGuideColumn = 80
+        } else {
+            textView.wrapGuideColumn = nil
+        }
+    }
+
+    @IBAction func setWrapGuideColumn(_ sender: Any?) {
+        let alert = NSAlert()
+        alert.messageText = "Wrap Guide Column"
+        alert.informativeText = "Show a vertical guideline at this column (0 to disable)."
+        alert.addButton(withTitle: "Set")
+        alert.addButton(withTitle: "Cancel")
+        let tf = NSTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
+        tf.stringValue = String(textView.wrapGuideColumn ?? 80)
+        alert.accessoryView = tf
+        alert.window.initialFirstResponder = tf
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let raw = tf.stringValue.trimmingCharacters(in: .whitespaces)
+        if let n = Int(raw), n > 0 {
+            textView.wrapGuideColumn = n
+        } else {
+            textView.wrapGuideColumn = nil
+        }
+    }
+
     @IBAction func increaseFontSize(_ sender: Any?) { fontSize = min(48, fontSize + 1); applyFont() }
     @IBAction func decreaseFontSize(_ sender: Any?) { fontSize = max(8, fontSize - 1); applyFont() }
 
@@ -507,6 +575,7 @@ final class EditorViewController: NSViewController, NSTextStorageDelegate, NSTex
     private func applyLanguage(_ lang: SyntaxHighlighter.Language) {
         language = lang
         host?.detectedLanguage = lang
+        textView.snippetLanguage = lang
         rehighlightAll()
         syncStatusBar()
         updateStatus()
@@ -524,6 +593,143 @@ final class EditorViewController: NSViewController, NSTextStorageDelegate, NSTex
               let eol = LineEnding(rawValue: raw) else { return }
         host?.lineEnding = eol
         host?.markEdited()
+    }
+
+    // MARK: Code folding
+
+    @IBAction func foldAtCurrentLine(_ sender: Any?) {
+        recomputeFoldsIfNeeded()
+        let nsString = textView.string as NSString
+        let caretLine = currentLineNumber()
+        // Largest fold whose headLine == caret line, or the smallest fold that
+        // contains the caret line.
+        let candidate = availableFolds
+            .filter { $0.headLine == caretLine }
+            .first
+            ?? availableFolds.first(where: { $0.headLine < caretLine && $0.endLine >= caretLine })
+        guard let fold = candidate else { NSSound.beep(); return }
+        if let existingIdx = foldedRanges.firstIndex(where: { NSEqualRanges($0, fold.hiddenRange) }) {
+            foldedRanges.remove(at: existingIdx)
+        } else {
+            foldedRanges.append(fold.hiddenRange)
+        }
+        invalidateGlyphs()
+        _ = nsString   // silence unused
+    }
+
+    @IBAction func foldAll(_ sender: Any?) {
+        recomputeFoldsIfNeeded()
+        foldedRanges = availableFolds.map { $0.hiddenRange }
+        invalidateGlyphs()
+    }
+
+    @IBAction func unfoldAll(_ sender: Any?) {
+        foldedRanges.removeAll()
+        invalidateGlyphs()
+    }
+
+    private func currentLineNumber() -> Int {
+        let nsString = textView.string as NSString
+        let caret = textView.selectedRange().location
+        var line = 1
+        var i = 0
+        while i < caret {
+            let r = nsString.range(of: "\n", options: [], range: NSRange(location: i, length: caret - i))
+            if r.location == NSNotFound { break }
+            line += 1
+            i = r.location + 1
+        }
+        return line
+    }
+
+    private func recomputeFoldsIfNeeded() {
+        availableFolds = CodeFolder.detectFolds(in: textView.string, language: language)
+    }
+
+    private func invalidateGlyphs() {
+        guard let lm = textView.layoutManager, let storage = textView.textStorage else { return }
+        let full = NSRange(location: 0, length: storage.length)
+        lm.invalidateGlyphs(forCharacterRange: full, changeInLength: 0, actualCharacterRange: nil)
+        lm.invalidateLayout(forCharacterRange: full, actualCharacterRange: nil)
+        lm.ensureLayout(for: textView.textContainer!)
+        textView.needsDisplay = true
+    }
+
+    // MARK: NSLayoutManagerDelegate — hide glyphs inside folded ranges
+
+    func layoutManager(_ layoutManager: NSLayoutManager,
+                       shouldGenerateGlyphs glyphs: UnsafePointer<CGGlyph>,
+                       properties props: UnsafePointer<NSLayoutManager.GlyphProperty>,
+                       characterIndexes charIndexes: UnsafePointer<Int>,
+                       font aFont: NSFont,
+                       forGlyphRange glyphRange: NSRange) -> Int {
+        guard !foldedRanges.isEmpty else { return 0 }
+        var modifiedProps = Array(UnsafeBufferPointer(start: props, count: glyphRange.length))
+        var modified = false
+        for i in 0..<glyphRange.length {
+            let charIdx = charIndexes[i]
+            for foldedRange in foldedRanges {
+                if NSLocationInRange(charIdx, foldedRange) {
+                    modifiedProps[i] = .null
+                    modified = true
+                    break
+                }
+            }
+        }
+        guard modified else { return 0 }
+        modifiedProps.withUnsafeBufferPointer { buf in
+            layoutManager.setGlyphs(glyphs,
+                                    properties: buf.baseAddress!,
+                                    characterIndexes: charIndexes,
+                                    font: aFont,
+                                    forGlyphRange: glyphRange)
+        }
+        return glyphRange.length
+    }
+
+    // MARK: Cursor history
+
+    @IBAction func cursorBack(_ sender: Any?) {
+        guard let target = cursorHistory.goBack() else { NSSound.beep(); return }
+        navigate(to: target)
+    }
+
+    @IBAction func cursorForward(_ sender: Any?) {
+        guard let target = cursorHistory.goForward() else { NSSound.beep(); return }
+        navigate(to: target)
+    }
+
+    private func navigate(to charIndex: Int) {
+        let nsString = textView.string as NSString
+        let safe = min(charIndex, nsString.length)
+        suppressHistoryRecording = true
+        textView.setSelectedRange(NSRange(location: safe, length: 0))
+        textView.scrollRangeToVisible(NSRange(location: safe, length: 0))
+        textView.window?.makeFirstResponder(textView)
+        suppressHistoryRecording = false
+    }
+
+    // MARK: Toggle line comment
+
+    @IBAction func toggleLineComment(_ sender: Any?) {
+        guard let token = CommentToggle.lineToken(for: language) else {
+            NSSound.beep(); return
+        }
+        let nsString = textView.string as NSString
+        let sel = textView.selectedRange()
+        // Expand to whole-line range.
+        let startLine = nsString.lineRange(for: NSRange(location: sel.location, length: 0))
+        let endProbe = max(sel.location, NSMaxRange(sel) - 1)
+        let endLine = nsString.lineRange(for: NSRange(location: min(endProbe, nsString.length), length: 0))
+        let block = NSRange(location: startLine.location, length: NSMaxRange(endLine) - startLine.location)
+        guard block.length > 0 else { return }
+        let original = nsString.substring(with: block)
+        guard let result = CommentToggle.toggle(lineBlock: original, token: token) else { return }
+        if textView.shouldChangeText(in: block, replacementString: result.replacement) {
+            textView.replaceCharacters(in: block, with: result.replacement)
+            textView.didChangeText()
+            textView.setSelectedRange(NSRange(location: block.location, length: (result.replacement as NSString).length))
+        }
     }
 
     // MARK: Goto

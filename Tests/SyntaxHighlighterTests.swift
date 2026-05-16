@@ -123,7 +123,7 @@ func registerSyntaxHighlighterTests() {
     test(suite, "allCases covers expected languages") {
         let expected: Set<SyntaxHighlighter.Language> = [
             .plain, .swift, .python, .javascript, .json, .markdown,
-            .html, .css, .yaml, .xml, .shell, .c, .cpp, .go, .rust
+            .html, .css, .yaml, .xml, .shell, .c, .cpp, .go, .rust, .java
         ]
         let actual = Set(SyntaxHighlighter.Language.allCases)
         try assertEqual(actual, expected)

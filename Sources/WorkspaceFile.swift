@@ -9,6 +9,7 @@ final class WorkspaceFile: EditingHost {
     var detectedLanguage: SyntaxHighlighter.Language
     var indentSettings: IndentSettings = .default
     private(set) var isEdited: Bool = false
+    var isPinned: Bool = false
 
     /// Created lazily on first editor attach so split-view editors share storage.
     private var sharedStorage: NSTextStorage?
