@@ -92,7 +92,9 @@ final class EditorViewController: NSViewController, NSTextStorageDelegate, NSTex
         if textView.textStorage?.delegate == nil {
             textView.textStorage?.delegate = self
         }
-        textView.layoutManager?.delegate = self
+        // Don't claim the layout-manager delegate role by default — it can
+        // alter glyph generation in subtle ways. We become the delegate
+        // only the first time a fold is requested (see ensureFoldingDelegate).
         textView.font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
         textView.backgroundColor = ThemeRegistry.current.background
         textView.textColor = ThemeRegistry.current.text
@@ -204,8 +206,15 @@ final class EditorViewController: NSViewController, NSTextStorageDelegate, NSTex
 
     func applyLoadedText() {
         guard isViewLoaded, let host = host else { return }
+        // Always set textView.string — even when the injected storage already
+        // has the text. Skipping this (the obvious "already populated"
+        // optimisation) leaves the freshly-attached layout manager without
+        // a glyph-generation trigger, which shows up as zero-height blank
+        // tabs on macOS Tahoe. suppressHighlight stops the storage delegate
+        // from re-highlighting and stops textDidChange from marking the
+        // host as edited during this initial populate.
         suppressHighlight = true
-        if injectedStorage == nil {
+        if textView.string != host.text {
             textView.string = host.text
         }
         suppressHighlight = false
@@ -213,6 +222,7 @@ final class EditorViewController: NSViewController, NSTextStorageDelegate, NSTex
         language = host.detectedLanguage
         textView.snippetLanguage = host.detectedLanguage
         rehighlightAll()
+        forceGlyphsAndLayout()
         syncStatusBar()
         updateStatus()
         bookmarks.removeAll()
@@ -227,6 +237,19 @@ final class EditorViewController: NSViewController, NSTextStorageDelegate, NSTex
         if view.window?.contentViewController === self {
             view.window?.title = host.editorTitle
         }
+    }
+
+    /// Force the layout manager to generate glyphs for the current buffer
+    /// and lay them out into the text container. Cheap; idempotent.
+    func forceGlyphsAndLayout() {
+        guard isViewLoaded, let lm = textView.layoutManager, let tc = textView.textContainer else { return }
+        let length = (textView.string as NSString).length
+        if length > 0 {
+            lm.ensureGlyphs(forCharacterRange: NSRange(location: 0, length: length))
+        }
+        lm.ensureLayout(for: tc)
+        textView.needsLayout = true
+        textView.needsDisplay = true
     }
 
     func currentText() -> String? {
@@ -389,6 +412,9 @@ final class EditorViewController: NSViewController, NSTextStorageDelegate, NSTex
     // MARK: NSTextViewDelegate
 
     func textDidChange(_ notification: Notification) {
+        // Initial populate (applyLoadedText) toggles suppressHighlight on
+        // while seeding textView.string — don't treat that as a user edit.
+        guard !suppressHighlight else { return }
         host?.text = textView.string
         host?.markEdited()
         updateStatus()
@@ -605,7 +631,18 @@ final class EditorViewController: NSViewController, NSTextStorageDelegate, NSTex
 
     // MARK: Code folding
 
+    /// Become the layout manager's delegate on first fold use. Done lazily
+    /// because being the delegate participates in glyph generation and we'd
+    /// rather not pay that cost (or risk that codepath) for editors that
+    /// never fold anything.
+    private func ensureFoldingDelegate() {
+        if textView.layoutManager?.delegate !== self {
+            textView.layoutManager?.delegate = self
+        }
+    }
+
     @IBAction func foldAtCurrentLine(_ sender: Any?) {
+        ensureFoldingDelegate()
         recomputeFoldsIfNeeded()
         let nsString = textView.string as NSString
         let caretLine = currentLineNumber()
@@ -626,6 +663,7 @@ final class EditorViewController: NSViewController, NSTextStorageDelegate, NSTex
     }
 
     @IBAction func foldAll(_ sender: Any?) {
+        ensureFoldingDelegate()
         recomputeFoldsIfNeeded()
         foldedRanges = availableFolds.map { $0.hiddenRange }
         invalidateGlyphs()
