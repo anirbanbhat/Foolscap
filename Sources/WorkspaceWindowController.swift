@@ -8,6 +8,7 @@ final class WorkspaceWindowController: NSWindowController, NSOutlineViewDataSour
     private var splitView: NSSplitView!
     private var outlineView: NSOutlineView!
     private var tabView: NSTabView!
+    private var tabBar: WorkspaceTabBar!
 
     private var openFiles: [WorkspaceFile] = []
     private var fileItemMap: [ObjectIdentifier: NSTabViewItem] = [:]
@@ -76,10 +77,30 @@ final class WorkspaceWindowController: NSWindowController, NSOutlineViewDataSour
         let tabContainer = NSView()
         tabContainer.translatesAutoresizingMaskIntoConstraints = false
 
+        // Custom horizontal tab strip above the content area. The NSTabView
+        // sits underneath with its built-in tabs hidden — we only use it
+        // for its content-swapping behaviour.
+        tabBar = WorkspaceTabBar()
+        tabBar.workspace = self
+        tabBar.translatesAutoresizingMaskIntoConstraints = false
+        tabBar.onSelect = { [weak self] idx in
+            guard let self = self, idx >= 0, idx < self.tabView.numberOfTabViewItems else { return }
+            self.tabView.selectTabViewItem(at: idx)
+        }
+        tabBar.onClose = { [weak self] idx in
+            guard let self = self, idx >= 0, idx < self.tabView.numberOfTabViewItems else { return }
+            self.closeTab(self.tabView.tabViewItems[idx])
+        }
+        tabBar.onRequestMenu = { [weak self] idx -> NSMenu? in
+            guard let self = self, idx >= 0, idx < self.tabView.numberOfTabViewItems else { return nil }
+            return self.contextMenu(forTab: self.tabView.tabViewItems[idx])
+        }
+        tabContainer.addSubview(tabBar)
+
         let workspaceTabs = WorkspaceTabView()
         workspaceTabs.workspaceController = self
         tabView = workspaceTabs
-        tabView.tabViewType = .topTabsBezelBorder
+        tabView.tabViewType = .noTabsNoBorder    // hidden — tab bar above replaces it
         tabView.translatesAutoresizingMaskIntoConstraints = false
         tabView.delegate = self
         tabContainer.addSubview(tabView)
@@ -92,9 +113,13 @@ final class WorkspaceWindowController: NSWindowController, NSOutlineViewDataSour
         tabContainer.addSubview(emptyLabel)
 
         NSLayoutConstraint.activate([
+            tabBar.leadingAnchor.constraint(equalTo: tabContainer.leadingAnchor),
+            tabBar.trailingAnchor.constraint(equalTo: tabContainer.trailingAnchor),
+            tabBar.topAnchor.constraint(equalTo: tabContainer.topAnchor),
+
             tabView.leadingAnchor.constraint(equalTo: tabContainer.leadingAnchor),
             tabView.trailingAnchor.constraint(equalTo: tabContainer.trailingAnchor),
-            tabView.topAnchor.constraint(equalTo: tabContainer.topAnchor),
+            tabView.topAnchor.constraint(equalTo: tabBar.bottomAnchor),
             tabView.bottomAnchor.constraint(equalTo: tabContainer.bottomAnchor),
             emptyLabel.centerXAnchor.constraint(equalTo: tabContainer.centerXAnchor),
             emptyLabel.centerYAnchor.constraint(equalTo: tabContainer.centerYAnchor),
@@ -106,12 +131,9 @@ final class WorkspaceWindowController: NSWindowController, NSOutlineViewDataSour
         splitView.setHoldingPriority(NSLayoutConstraint.Priority(260), forSubviewAt: 0)
         splitView.setHoldingPriority(.defaultLow, forSubviewAt: 1)
 
-        // Sidebar has a hard floor / ceiling so a runaway tab strip can't
-        // eat the file panel.
-        NSLayoutConstraint.activate([
-            sidebarScroll.widthAnchor.constraint(greaterThanOrEqualToConstant: 180),
-            sidebarScroll.widthAnchor.constraint(lessThanOrEqualToConstant: 420),
-        ])
+        // Sidebar has a hard floor so a tab strip can't eat the file panel.
+        // No upper ceiling — the user can drag wider if they want.
+        sidebarScroll.widthAnchor.constraint(greaterThanOrEqualToConstant: 180).isActive = true
 
         let content = NSView()
         content.addSubview(splitView)
@@ -157,6 +179,7 @@ final class WorkspaceWindowController: NSWindowController, NSOutlineViewDataSour
         tabView.selectTabViewItem(item)
         bumpMRU(forIndex: tabView.indexOfTabViewItem(item))
         updateEmptyHint()
+        refreshTabBar()
         return file
     }
 
@@ -209,6 +232,7 @@ final class WorkspaceWindowController: NSWindowController, NSOutlineViewDataSour
         let pin = file.isPinned ? "● " : ""
         let dirty = file.isEdited ? "• " : ""
         item.label = pin + dirty + file.editorTitle
+        refreshTabBar()
     }
 
     // MARK: Right-click context menu
@@ -310,6 +334,7 @@ final class WorkspaceWindowController: NSWindowController, NSOutlineViewDataSour
         openFiles.removeAll { $0 === file }
         rebuildMRU(removingIndex: idx)
         updateEmptyHint()
+        refreshTabBar()
     }
 
     // MARK: Sequential tab navigation
@@ -367,6 +392,7 @@ final class WorkspaceWindowController: NSWindowController, NSOutlineViewDataSour
         tabView.removeTabViewItem(item)
         tabView.insertTabViewItem(item, at: idx + 1)
         tabView.selectTabViewItem(item)
+        refreshTabBar()
     }
 
     private func pinState(of item: NSTabViewItem) -> Bool {
@@ -384,11 +410,27 @@ final class WorkspaceWindowController: NSWindowController, NSOutlineViewDataSour
         for item in items { tabView.removeTabViewItem(item) }
         for item in newOrder { tabView.addTabViewItem(item) }
         if let selected = selected { tabView.selectTabViewItem(selected) }
+        refreshTabBar()
     }
 
     func fileDidSave(_ file: WorkspaceFile) {
         fileDidChangeEditedState(file)
         for ed in file.editors { ed.handleDocumentCleared() }
+    }
+
+    /// Rebuild the visible tab bar from the current `tabView` state.
+    /// Call after any add / remove / reorder / pin / edited-state change.
+    func refreshTabBar() {
+        var descriptors: [(label: String, isPinned: Bool, isEdited: Bool)] = []
+        for item in tabView.tabViewItems {
+            if let container = item.viewController as? TabContainerViewController, let file = container.file {
+                descriptors.append((label: file.editorTitle, isPinned: file.isPinned, isEdited: file.isEdited))
+            } else {
+                descriptors.append((label: item.label, isPinned: false, isEdited: false))
+            }
+        }
+        let selected = tabView.selectedTabViewItem.flatMap { tabView.indexOfTabViewItem($0) } ?? -1
+        tabBar.reload(tabs: descriptors, selected: selected)
     }
 
     private func updateEmptyHint() {
@@ -454,7 +496,9 @@ final class WorkspaceWindowController: NSWindowController, NSOutlineViewDataSour
 
     func tabView(_ tabView: NSTabView, didSelect tabViewItem: NSTabViewItem?) {
         guard let item = tabViewItem else { return }
-        bumpMRU(forIndex: tabView.indexOfTabViewItem(item))
+        let idx = tabView.indexOfTabViewItem(item)
+        bumpMRU(forIndex: idx)
+        tabBar?.select(at: idx)
         if let container = item.viewController as? TabContainerViewController, let primary = container.primary {
             container.view.needsLayout = true
             container.view.layoutSubtreeIfNeeded()
