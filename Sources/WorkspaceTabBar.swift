@@ -3,20 +3,15 @@ import AppKit
 /// Custom horizontal tab strip used by WorkspaceWindowController instead of
 /// NSTabView's built-in tab control.
 ///
-/// Why we don't use NSTabView's tabs:
-///   - Single tab gets centred instead of left-aligned
-///   - No right-click menu hook on a specific tab
-///   - Tab strip's intrinsic width grows with tab count, which yanks
-///     space away from the sidebar split-view subview
-///
-/// This view is a thin NSScrollView wrapping a horizontal NSStackView of
-/// TabButton instances. NSTabView remains underneath as a content-swapping
-/// container with `tabViewType = .noTabsNoBorder`.
+/// Layout: a plain NSStackView pinned to the bar's edges. Buttons are added
+/// with `.leading` gravity so they pack left-to-right. No NSScrollView —
+/// when the buttons overflow they're clipped at the trailing edge. We can
+/// add an overflow chevron later; the priority for now is that clicks land
+/// where the user expects them.
 final class WorkspaceTabBar: NSView {
 
     weak var workspace: WorkspaceWindowController?
 
-    /// External callbacks. WorkspaceWindowController wires them up.
     var onSelect: ((Int) -> Void)?
     var onClose: ((Int) -> Void)?
     var onRequestMenu: ((Int) -> NSMenu?)?
@@ -24,7 +19,6 @@ final class WorkspaceTabBar: NSView {
     private(set) var selectedIndex: Int = -1
     private var buttons: [TabButton] = []
 
-    private let scrollView = NSScrollView()
     private let stack = NSStackView()
     private let bottomLine = NSView()
 
@@ -39,22 +33,13 @@ final class WorkspaceTabBar: NSView {
         wantsLayer = true
         layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
 
-        scrollView.translatesAutoresizingMaskIntoConstraints = false
-        scrollView.hasHorizontalScroller = false
-        scrollView.hasVerticalScroller = false
-        scrollView.autohidesScrollers = true
-        scrollView.borderType = .noBorder
-        scrollView.drawsBackground = false
-        scrollView.horizontalScrollElasticity = .allowed
-        addSubview(scrollView)
-
         stack.translatesAutoresizingMaskIntoConstraints = false
         stack.orientation = .horizontal
         stack.alignment = .centerY
         stack.distribution = .gravityAreas
         stack.spacing = 1
         stack.edgeInsets = NSEdgeInsets(top: 0, left: 4, bottom: 0, right: 4)
-        scrollView.documentView = stack
+        addSubview(stack)
 
         bottomLine.translatesAutoresizingMaskIntoConstraints = false
         bottomLine.wantsLayer = true
@@ -62,31 +47,24 @@ final class WorkspaceTabBar: NSView {
         addSubview(bottomLine)
 
         NSLayoutConstraint.activate([
-            scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
-            scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            scrollView.topAnchor.constraint(equalTo: topAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: bottomLine.topAnchor),
+            heightAnchor.constraint(equalToConstant: 30),
+
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
+            stack.topAnchor.constraint(equalTo: topAnchor),
+            stack.bottomAnchor.constraint(equalTo: bottomLine.topAnchor),
 
             bottomLine.leadingAnchor.constraint(equalTo: leadingAnchor),
             bottomLine.trailingAnchor.constraint(equalTo: trailingAnchor),
             bottomLine.bottomAnchor.constraint(equalTo: bottomAnchor),
             bottomLine.heightAnchor.constraint(equalToConstant: 0.5),
-
-            heightAnchor.constraint(equalToConstant: 30),
-
-            stack.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
-            stack.bottomAnchor.constraint(equalTo: scrollView.contentView.bottomAnchor),
-            stack.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
-            stack.heightAnchor.constraint(equalTo: scrollView.contentView.heightAnchor),
         ])
     }
 
-    /// Replace the entire set of buttons. Cheap enough for our scale (a few
-    /// dozen tabs at most); avoids fiddly diffing.
+    /// Replace the entire set of buttons. Cheap enough at our scale.
     func reload(tabs: [(label: String, isPinned: Bool, isEdited: Bool)], selected: Int) {
         for b in buttons {
-            stack.removeArrangedSubview(b)
-            b.removeFromSuperview()
+            stack.removeView(b)
         }
         buttons.removeAll()
 
@@ -96,7 +74,8 @@ final class WorkspaceTabBar: NSView {
             btn.onClick = { [weak self] idx in self?.onSelect?(idx) }
             btn.onClose = { [weak self] idx in self?.onClose?(idx) }
             btn.onRequestMenu = { [weak self] idx -> NSMenu? in self?.onRequestMenu?(idx) }
-            stack.addArrangedSubview(btn)
+            // Leading gravity — buttons pack against the leading edge.
+            stack.addView(btn, in: .leading)
             buttons.append(btn)
         }
         select(at: selected)
@@ -105,33 +84,25 @@ final class WorkspaceTabBar: NSView {
     func select(at index: Int) {
         selectedIndex = index
         for (i, b) in buttons.enumerated() { b.isSelected = (i == index) }
-        scrollSelectionIntoView()
     }
 
     func updateButton(at index: Int, label: String, isPinned: Bool, isEdited: Bool) {
         guard index >= 0 && index < buttons.count else { return }
         buttons[index].update(label: label, isPinned: isPinned, isEdited: isEdited)
     }
-
-    private func scrollSelectionIntoView() {
-        guard selectedIndex >= 0 && selectedIndex < buttons.count else { return }
-        let b = buttons[selectedIndex]
-        // Defer so the stack has had a chance to lay out before we ask for
-        // the button's frame.
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            let target = self.stack.convert(b.frame, to: self.scrollView.contentView)
-            self.scrollView.contentView.scrollToVisible(target)
-        }
-    }
 }
 
-/// Single tab button. Custom-drawn for selected/hover states; close × on the
-/// right; right-click presents the context menu from `onRequestMenu`.
+/// Single tab button.
 final class TabButton: NSView {
 
     var index: Int
-    var isSelected: Bool = false { didSet { needsDisplay = true } }
+    var isSelected: Bool = false {
+        didSet {
+            needsDisplay = true
+            label.textColor = isSelected ? NSColor.labelColor : NSColor.secondaryLabelColor
+            closeButton.isHidden = !(isSelected || isHovered)
+        }
+    }
     private var isHovered: Bool = false {
         didSet {
             needsDisplay = true
@@ -159,6 +130,8 @@ final class TabButton: NSView {
         label.lineBreakMode = .byTruncatingMiddle
         label.maximumNumberOfLines = 1
         label.cell?.usesSingleLineMode = true
+        // Crucially: stop the label from eating mouseDown.
+        label.refusesFirstResponder = true
         addSubview(label)
 
         let xImage = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close")?
@@ -172,7 +145,7 @@ final class TabButton: NSView {
         closeButton.action = #selector(closeClicked(_:))
         closeButton.isHidden = true
         closeButton.contentTintColor = NSColor.secondaryLabelColor
-        closeButton.setContentHuggingPriority(.required, for: .horizontal)
+        closeButton.refusesFirstResponder = true
         addSubview(closeButton)
 
         NSLayoutConstraint.activate([
@@ -183,7 +156,7 @@ final class TabButton: NSView {
             label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             label.centerYAnchor.constraint(equalTo: centerYAnchor),
 
-            closeButton.leadingAnchor.constraint(equalTo: label.trailingAnchor, constant: 6),
+            closeButton.leadingAnchor.constraint(greaterThanOrEqualTo: label.trailingAnchor, constant: 6),
             closeButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
             closeButton.centerYAnchor.constraint(equalTo: centerYAnchor),
             closeButton.widthAnchor.constraint(equalToConstant: 14),
@@ -208,10 +181,7 @@ final class TabButton: NSView {
         onClose?(index)
     }
 
-    /// NSTextField (even in label mode) hit-tests itself, so without this
-    /// override clicks on the file name never reach our mouseDown. Claim
-    /// the whole button area for ourselves; defer to closeButton only when
-    /// the click actually lands on it.
+    /// Make sure clicks on the label or background fall through to us.
     override func hitTest(_ point: NSPoint) -> NSView? {
         let local = convert(point, from: superview)
         guard bounds.contains(local) else { return nil }
@@ -221,15 +191,12 @@ final class TabButton: NSView {
         return self
     }
 
-    /// Accept clicks even when the window isn't main — same as native tabs.
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func mouseDown(with event: NSEvent) {
         onClick?(index)
     }
 
-    /// Use the menu(for:) hook so AppKit also presents the menu on
-    /// Control-click and on right-click via the trackpad / accessibility.
     override func menu(for event: NSEvent) -> NSMenu? {
         return onRequestMenu?(index)
     }
@@ -261,12 +228,11 @@ final class TabButton: NSView {
     override func draw(_ dirtyRect: NSRect) {
         let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0, dy: 2), xRadius: 5, yRadius: 5)
         if isSelected {
-            NSColor.controlAccentColor.withAlphaComponent(0.22).setFill()
+            NSColor.controlAccentColor.withAlphaComponent(0.28).setFill()
             path.fill()
         } else if isHovered {
-            NSColor.controlColor.withAlphaComponent(0.45).setFill()
+            NSColor.controlColor.withAlphaComponent(0.5).setFill()
             path.fill()
         }
-        label.textColor = isSelected ? NSColor.labelColor : NSColor.secondaryLabelColor
     }
 }
