@@ -1,26 +1,36 @@
 import AppKit
 
-/// Custom horizontal tab strip used by WorkspaceWindowController instead of
-/// NSTabView's built-in tab control.
+/// Left-aligned tab strip for workspace windows.
 ///
-/// Layout: a plain NSStackView pinned to the bar's edges. Buttons are added
-/// with `.leading` gravity so they pack left-to-right. No NSScrollView —
-/// when the buttons overflow they're clipped at the trailing edge. We can
-/// add an overflow chevron later; the priority for now is that clicks land
-/// where the user expects them.
+/// The content swap still lives in NSTabView; this view only provides the
+/// visible, clickable tab row. It uses real NSButton subclasses for mouse
+/// handling instead of relying on NSTabView's centered built-in tab layout.
 final class WorkspaceTabBar: NSView {
-
-    weak var workspace: WorkspaceWindowController?
 
     var onSelect: ((Int) -> Void)?
     var onClose: ((Int) -> Void)?
     var onRequestMenu: ((Int) -> NSMenu?)?
 
-    private(set) var selectedIndex: Int = -1
-    private var buttons: [TabButton] = []
+    private struct Tab {
+        var label: String
+        var isPinned: Bool
+        var isEdited: Bool
+    }
 
-    private let stack = NSStackView()
+    private var tabs: [Tab] = []
+    private var buttons: [WorkspaceTabButton] = []
+    private(set) var selectedIndex: Int = -1
+
+    private let scrollView = NSScrollView()
+    private let documentView = FlippedView()
     private let bottomLine = NSView()
+
+    private let barHeight: CGFloat = 32
+    private let tabHeight: CGFloat = 29
+    private let horizontalInset: CGFloat = 4
+    private let tabSpacing: CGFloat = 1
+    private let minTabWidth: CGFloat = 92
+    private let maxTabWidth: CGFloat = 260
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -33,13 +43,16 @@ final class WorkspaceTabBar: NSView {
         wantsLayer = true
         layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
 
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        stack.orientation = .horizontal
-        stack.alignment = .centerY
-        stack.distribution = .gravityAreas
-        stack.spacing = 1
-        stack.edgeInsets = NSEdgeInsets(top: 0, left: 4, bottom: 0, right: 4)
-        addSubview(stack)
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.hasHorizontalScroller = false
+        scrollView.hasVerticalScroller = false
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .noBorder
+        scrollView.drawsBackground = false
+        scrollView.horizontalScrollElasticity = .allowed
+        documentView.frame = NSRect(x: 0, y: 0, width: 1, height: barHeight)
+        scrollView.documentView = documentView
+        addSubview(scrollView)
 
         bottomLine.translatesAutoresizingMaskIntoConstraints = false
         bottomLine.wantsLayer = true
@@ -47,12 +60,12 @@ final class WorkspaceTabBar: NSView {
         addSubview(bottomLine)
 
         NSLayoutConstraint.activate([
-            heightAnchor.constraint(equalToConstant: 30),
+            heightAnchor.constraint(equalToConstant: barHeight),
 
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
-            stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
-            stack.topAnchor.constraint(equalTo: topAnchor),
-            stack.bottomAnchor.constraint(equalTo: bottomLine.topAnchor),
+            scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            scrollView.topAnchor.constraint(equalTo: topAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: bottomLine.topAnchor),
 
             bottomLine.leadingAnchor.constraint(equalTo: leadingAnchor),
             bottomLine.trailingAnchor.constraint(equalTo: trailingAnchor),
@@ -61,157 +74,163 @@ final class WorkspaceTabBar: NSView {
         ])
     }
 
-    /// Replace the entire set of buttons. Cheap enough at our scale.
     func reload(tabs: [(label: String, isPinned: Bool, isEdited: Bool)], selected: Int) {
-        for b in buttons {
-            stack.removeView(b)
+        self.tabs = tabs.map { Tab(label: $0.label, isPinned: $0.isPinned, isEdited: $0.isEdited) }
+
+        for button in buttons {
+            button.removeFromSuperview()
         }
         buttons.removeAll()
 
-        for (i, t) in tabs.enumerated() {
-            let btn = TabButton(index: i)
-            btn.update(label: t.label, isPinned: t.isPinned, isEdited: t.isEdited)
-            btn.onClick = { [weak self] idx in self?.onSelect?(idx) }
-            btn.onClose = { [weak self] idx in self?.onClose?(idx) }
-            btn.onRequestMenu = { [weak self] idx -> NSMenu? in self?.onRequestMenu?(idx) }
-            // Leading gravity — buttons pack against the leading edge.
-            stack.addView(btn, in: .leading)
-            buttons.append(btn)
+        for index in self.tabs.indices {
+            let button = WorkspaceTabButton(index: index)
+            button.onSelect = { [weak self] idx in self?.onSelect?(idx) }
+            button.onClose = { [weak self] idx in self?.onClose?(idx) }
+            button.onRequestMenu = { [weak self] idx in self?.onRequestMenu?(idx) }
+            documentView.addSubview(button)
+            buttons.append(button)
         }
+
+        updateButtonContent()
+        layoutButtons()
         select(at: selected)
     }
 
     func select(at index: Int) {
         selectedIndex = index
-        for (i, b) in buttons.enumerated() { b.isSelected = (i == index) }
+        for (i, button) in buttons.enumerated() {
+            button.isTabSelected = (i == index)
+        }
+        scrollSelectionIntoView()
     }
 
-    func updateButton(at index: Int, label: String, isPinned: Bool, isEdited: Bool) {
-        guard index >= 0 && index < buttons.count else { return }
-        buttons[index].update(label: label, isPinned: isPinned, isEdited: isEdited)
+    override func layout() {
+        super.layout()
+        layoutButtons()
+        scrollSelectionIntoView()
+    }
+
+    private func updateButtonContent() {
+        for (index, tab) in tabs.enumerated() {
+            buttons[index].title = renderedTitle(for: tab)
+        }
+    }
+
+    private func renderedTitle(for tab: Tab) -> String {
+        let pin = tab.isPinned ? "● " : ""
+        let dirty = tab.isEdited ? "• " : ""
+        return pin + dirty + tab.label
+    }
+
+    private func layoutButtons() {
+        guard bounds.width > 0 else { return }
+        let height = max(bounds.height - 0.5, tabHeight)
+        var x = horizontalInset
+
+        for button in buttons {
+            let desired = button.preferredWidth(minimum: minTabWidth, maximum: maxTabWidth)
+            button.frame = NSRect(x: x, y: 0, width: desired, height: tabHeight)
+            x += desired + tabSpacing
+        }
+
+        let totalWidth = max(x - tabSpacing + horizontalInset, bounds.width)
+        documentView.frame = NSRect(x: 0, y: 0, width: totalWidth, height: height)
+    }
+
+    private func scrollSelectionIntoView() {
+        guard buttons.indices.contains(selectedIndex) else { return }
+        let target = buttons[selectedIndex].frame.insetBy(dx: -horizontalInset, dy: 0)
+        documentView.scrollToVisible(target)
+        scrollView.reflectScrolledClipView(scrollView.contentView)
     }
 }
 
-/// Single tab button.
-final class TabButton: NSView {
+private final class FlippedView: NSView {
+    override var isFlipped: Bool { true }
+}
 
-    var index: Int
-    var isSelected: Bool = false {
-        didSet {
-            needsDisplay = true
-            label.textColor = isSelected ? NSColor.labelColor : NSColor.secondaryLabelColor
-            closeButton.isHidden = !(isSelected || isHovered)
-        }
-    }
-    private var isHovered: Bool = false {
-        didSet {
-            needsDisplay = true
-            closeButton.isHidden = !(isHovered || isSelected)
-        }
-    }
+private final class WorkspaceTabButton: NSButton {
 
-    private let label = NSTextField(labelWithString: "")
-    private let closeButton = NSButton(title: "", target: nil, action: nil)
+    let index: Int
 
-    var onClick: ((Int) -> Void)?
+    var onSelect: ((Int) -> Void)?
     var onClose: ((Int) -> Void)?
     var onRequestMenu: ((Int) -> NSMenu?)?
 
+    var isTabSelected = false {
+        didSet { needsDisplay = true }
+    }
+
+    private var isHovered = false {
+        didSet { needsDisplay = true }
+    }
+
     private var trackingArea: NSTrackingArea?
+    private let tabFont = NSFont.systemFont(ofSize: 12)
+    private let closeImage = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close")?
+        .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 9, weight: .bold))
+
+    private let titleLeading: CGFloat = 12
+    private let titleToCloseSpacing: CGFloat = 6
+    private let closeSize: CGFloat = 14
+    private let closeTrailing: CGFloat = 8
 
     init(index: Int) {
         self.index = index
         super.init(frame: .zero)
+        isBordered = false
+        bezelStyle = .regularSquare
+        setButtonType(.momentaryChange)
         wantsLayer = true
-        translatesAutoresizingMaskIntoConstraints = false
-
-        label.translatesAutoresizingMaskIntoConstraints = false
-        label.font = NSFont.systemFont(ofSize: 12)
-        label.lineBreakMode = .byTruncatingMiddle
-        label.maximumNumberOfLines = 1
-        label.cell?.usesSingleLineMode = true
-        // Crucially: stop the label from eating mouseDown.
-        label.refusesFirstResponder = true
-        addSubview(label)
-
-        let xImage = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close")?
-            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 9, weight: .bold))
-        closeButton.image = xImage
-        closeButton.imagePosition = .imageOnly
-        closeButton.bezelStyle = .smallSquare
-        closeButton.isBordered = false
-        closeButton.translatesAutoresizingMaskIntoConstraints = false
-        closeButton.target = self
-        closeButton.action = #selector(closeClicked(_:))
-        closeButton.isHidden = true
-        closeButton.contentTintColor = NSColor.secondaryLabelColor
-        closeButton.refusesFirstResponder = true
-        addSubview(closeButton)
-
-        NSLayoutConstraint.activate([
-            heightAnchor.constraint(equalToConstant: 28),
-            widthAnchor.constraint(greaterThanOrEqualToConstant: 80),
-            widthAnchor.constraint(lessThanOrEqualToConstant: 220),
-
-            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            label.centerYAnchor.constraint(equalTo: centerYAnchor),
-
-            closeButton.leadingAnchor.constraint(greaterThanOrEqualTo: label.trailingAnchor, constant: 6),
-            closeButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
-            closeButton.centerYAnchor.constraint(equalTo: centerYAnchor),
-            closeButton.widthAnchor.constraint(equalToConstant: 14),
-            closeButton.heightAnchor.constraint(equalToConstant: 14),
-        ])
+        focusRingType = .none
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func update(label text: String, isPinned: Bool, isEdited: Bool) {
-        var rendered = ""
-        if isPinned { rendered += "● " }
-        if isEdited { rendered += "• " }
-        rendered += text
-        label.stringValue = rendered
-        label.textColor = isSelected ? NSColor.labelColor : NSColor.secondaryLabelColor
-        invalidateIntrinsicContentSize()
-        needsDisplay = true
-    }
-
-    @objc private func closeClicked(_ sender: Any?) {
-        onClose?(index)
-    }
-
-    /// Make sure clicks on the label or background fall through to us.
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        let local = convert(point, from: superview)
-        guard bounds.contains(local) else { return nil }
-        if !closeButton.isHidden && closeButton.frame.contains(local) {
-            return closeButton
-        }
-        return self
-    }
-
+    override var mouseDownCanMoveWindow: Bool { false }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
-    override func mouseDown(with event: NSEvent) {
-        onClick?(index)
+    func preferredWidth(minimum: CGFloat, maximum: CGFloat) -> CGFloat {
+        let titleWidth = ceil((title as NSString).size(withAttributes: [.font: tabFont]).width)
+        let desired = titleLeading + titleWidth + titleToCloseSpacing + closeSize + closeTrailing
+        return min(max(desired, minimum), maximum)
     }
 
-    override func menu(for event: NSEvent) -> NSMenu? {
-        return onRequestMenu?(index)
+    override func mouseDown(with event: NSEvent) {
+        if event.modifierFlags.contains(.control), popUpContextMenu(with: event) {
+            return
+        }
+
+        let point = convert(event.locationInWindow, from: nil)
+        if closeRect.contains(point), showsCloseButton {
+            onClose?(index)
+        } else {
+            onSelect?(index)
+        }
     }
 
     override func rightMouseDown(with event: NSEvent) {
-        if let m = onRequestMenu?(index) {
-            NSMenu.popUpContextMenu(m, with: event, for: self)
-        } else {
+        if !popUpContextMenu(with: event) {
             super.rightMouseDown(with: event)
         }
     }
 
+    override func menu(for event: NSEvent) -> NSMenu? {
+        onRequestMenu?(index)
+    }
+
+    @discardableResult
+    private func popUpContextMenu(with event: NSEvent) -> Bool {
+        guard let menu = onRequestMenu?(index) else { return false }
+        NSMenu.popUpContextMenu(menu, with: event, for: self)
+        return true
+    }
+
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
-        if let trackingArea = trackingArea { removeTrackingArea(trackingArea) }
+        if let trackingArea = trackingArea {
+            removeTrackingArea(trackingArea)
+        }
         let area = NSTrackingArea(
             rect: bounds,
             options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
@@ -222,17 +241,69 @@ final class TabButton: NSView {
         trackingArea = area
     }
 
-    override func mouseEntered(with event: NSEvent) { isHovered = true }
-    override func mouseExited(with event: NSEvent) { isHovered = false }
+    override func mouseEntered(with event: NSEvent) {
+        isHovered = true
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
+    }
+
+    private var showsCloseButton: Bool {
+        isTabSelected || isHovered
+    }
+
+    private var closeRect: NSRect {
+        NSRect(
+            x: bounds.maxX - closeTrailing - closeSize,
+            y: bounds.midY - closeSize / 2,
+            width: closeSize,
+            height: closeSize
+        )
+    }
+
+    private var titleRect: NSRect {
+        let close = closeRect
+        return NSRect(
+            x: bounds.minX + titleLeading,
+            y: bounds.midY - 9,
+            width: max(0, close.minX - titleToCloseSpacing - (bounds.minX + titleLeading)),
+            height: 18
+        )
+    }
 
     override func draw(_ dirtyRect: NSRect) {
-        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0, dy: 2), xRadius: 5, yRadius: 5)
-        if isSelected {
-            NSColor.controlAccentColor.withAlphaComponent(0.28).setFill()
-            path.fill()
+        let tabPath = NSBezierPath(roundedRect: bounds.insetBy(dx: 0, dy: 2), xRadius: 5, yRadius: 5)
+        if isTabSelected {
+            NSColor.controlAccentColor.withAlphaComponent(0.32).setFill()
+            tabPath.fill()
         } else if isHovered {
             NSColor.controlColor.withAlphaComponent(0.5).setFill()
-            path.fill()
+            tabPath.fill()
+        }
+
+        let style = NSMutableParagraphStyle()
+        style.lineBreakMode = .byTruncatingMiddle
+        let color = isTabSelected ? NSColor.labelColor : NSColor.secondaryLabelColor
+        let attributed = NSAttributedString(
+            string: title,
+            attributes: [
+                .font: tabFont,
+                .foregroundColor: color,
+                .paragraphStyle: style,
+            ]
+        )
+        attributed.draw(with: titleRect, options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
+
+        if showsCloseButton {
+            if let closeImage = closeImage {
+                closeImage.draw(in: closeRect)
+            } else {
+                "x".draw(in: closeRect, withAttributes: [
+                    .font: NSFont.boldSystemFont(ofSize: 10),
+                    .foregroundColor: NSColor.secondaryLabelColor,
+                ])
+            }
         }
     }
 }

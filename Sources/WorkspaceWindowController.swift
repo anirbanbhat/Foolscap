@@ -24,7 +24,11 @@ final class WorkspaceWindowController: NSWindowController, NSOutlineViewDataSour
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1100, height: 720),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            // Keep workspace content below the titlebar. The custom tab strip
+            // needs to receive mouse events like a normal content view; placing
+            // it in a full-size titlebar area lets macOS treat the same region
+            // as window chrome/drag space instead.
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false)
         window.title = folderURL.lastPathComponent
@@ -77,11 +81,7 @@ final class WorkspaceWindowController: NSWindowController, NSOutlineViewDataSour
         let tabContainer = NSView()
         tabContainer.translatesAutoresizingMaskIntoConstraints = false
 
-        // Custom horizontal tab strip above the content area. The NSTabView
-        // sits underneath with its built-in tabs hidden — we only use it
-        // for its content-swapping behaviour.
         tabBar = WorkspaceTabBar()
-        tabBar.workspace = self
         tabBar.translatesAutoresizingMaskIntoConstraints = false
         tabBar.onSelect = { [weak self] idx in
             guard let self = self, idx >= 0, idx < self.tabView.numberOfTabViewItems else { return }
@@ -100,7 +100,7 @@ final class WorkspaceWindowController: NSWindowController, NSOutlineViewDataSour
         let workspaceTabs = WorkspaceTabView()
         workspaceTabs.workspaceController = self
         tabView = workspaceTabs
-        tabView.tabViewType = .noTabsNoBorder    // hidden — tab bar above replaces it
+        tabView.tabViewType = .noTabsNoBorder
         tabView.translatesAutoresizingMaskIntoConstraints = false
         tabView.delegate = self
         tabContainer.addSubview(tabView)
@@ -172,7 +172,7 @@ final class WorkspaceWindowController: NSWindowController, NSOutlineViewDataSour
         let container = TabContainerViewController(file: file)
 
         let item = NSTabViewItem(viewController: container)
-        item.label = file.editorTitle
+        item.label = tabLabel(for: file)
         tabView.addTabViewItem(item)
         fileItemMap[ObjectIdentifier(file)] = item
         openFiles.append(file)
@@ -213,6 +213,7 @@ final class WorkspaceWindowController: NSWindowController, NSOutlineViewDataSour
         // Rebuild MRU (indices shifted).
         rebuildMRU(removingIndex: idx)
         updateEmptyHint()
+        refreshTabBar()
     }
 
     func saveCurrentTab() {
@@ -229,10 +230,14 @@ final class WorkspaceWindowController: NSWindowController, NSOutlineViewDataSour
     // Called by WorkspaceFile after edit/save.
     func fileDidChangeEditedState(_ file: WorkspaceFile) {
         guard let item = fileItemMap[ObjectIdentifier(file)] else { return }
+        item.label = tabLabel(for: file)
+        refreshTabBar()
+    }
+
+    private func tabLabel(for file: WorkspaceFile) -> String {
         let pin = file.isPinned ? "● " : ""
         let dirty = file.isEdited ? "• " : ""
-        item.label = pin + dirty + file.editorTitle
-        refreshTabBar()
+        return pin + dirty + file.editorTitle
     }
 
     // MARK: Right-click context menu
@@ -242,20 +247,10 @@ final class WorkspaceWindowController: NSWindowController, NSOutlineViewDataSour
     func contextMenu(forTab item: NSTabViewItem) -> NSMenu {
         contextMenuTargetItem = item
         let menu = NSMenu()
-        menu.addItem(withTitle: "Close", action: #selector(ctxCloseTab(_:)), keyEquivalent: "")
+        menu.addItem(withTitle: "Close Tab", action: #selector(ctxCloseTab(_:)), keyEquivalent: "")
         menu.addItem(withTitle: "Close Other Tabs", action: #selector(ctxCloseOtherTabs(_:)), keyEquivalent: "")
-        menu.addItem(withTitle: "Close Tabs to the Left", action: #selector(ctxCloseLeftTabs(_:)), keyEquivalent: "")
-        menu.addItem(withTitle: "Close Tabs to the Right", action: #selector(ctxCloseRightTabs(_:)), keyEquivalent: "")
-        menu.addItem(withTitle: "Close All Tabs", action: #selector(ctxCloseAllTabs(_:)), keyEquivalent: "")
-        menu.addItem(NSMenuItem.separator())
-        let pinTitle: String
-        if let container = item.viewController as? TabContainerViewController,
-           let file = container.file, file.isPinned {
-            pinTitle = "Unpin Tab"
-        } else {
-            pinTitle = "Pin Tab"
-        }
-        menu.addItem(withTitle: pinTitle, action: #selector(ctxTogglePin(_:)), keyEquivalent: "")
+        menu.addItem(withTitle: "Move Tab to New Window", action: #selector(ctxMoveTabToNewWindow(_:)), keyEquivalent: "")
+        menu.addItem(withTitle: "Show All Tabs", action: #selector(ctxShowAllTabs(_:)), keyEquivalent: "")
         for item in menu.items { item.target = self }
         return menu
     }
@@ -270,31 +265,60 @@ final class WorkspaceWindowController: NSWindowController, NSOutlineViewDataSour
         guard let target = contextMenuTargetItem else { return }
         contextMenuTargetItem = nil
         let others = tabView.tabViewItems.filter { $0 !== target }
-        for item in others { closeTab(item) }
+        for item in others {
+            if !closeTab(item) { break }
+        }
+    }
+
+    @objc private func ctxMoveTabToNewWindow(_ sender: Any?) {
+        guard let target = contextMenuTargetItem,
+              let container = target.viewController as? TabContainerViewController,
+              let file = container.file else {
+            contextMenuTargetItem = nil
+            return
+        }
+        contextMenuTargetItem = nil
+        let url = file.url
+        if closeTab(target) {
+            NSDocumentController.shared.openDocument(withContentsOf: url, display: true) { _, _, _ in }
+        }
+    }
+
+    @objc private func ctxShowAllTabs(_ sender: Any?) {
+        contextMenuTargetItem = nil
+        showOpenTabSwitcher(sender)
     }
 
     @objc private func ctxCloseLeftTabs(_ sender: Any?) {
         guard let target = contextMenuTargetItem else { return }
         contextMenuTargetItem = nil
         let targetIdx = tabView.indexOfTabViewItem(target)
+        guard targetIdx != NSNotFound else { return }
         let lefts = (0..<targetIdx).map { tabView.tabViewItems[$0] }
-        for item in lefts { closeTab(item) }
+        for item in lefts {
+            if !closeTab(item) { break }
+        }
     }
 
     @objc private func ctxCloseRightTabs(_ sender: Any?) {
         guard let target = contextMenuTargetItem else { return }
         contextMenuTargetItem = nil
         let targetIdx = tabView.indexOfTabViewItem(target)
+        guard targetIdx != NSNotFound else { return }
         let count = tabView.numberOfTabViewItems
         guard targetIdx + 1 < count else { return }
         let rights = ((targetIdx + 1)..<count).map { tabView.tabViewItems[$0] }
-        for item in rights { closeTab(item) }
+        for item in rights {
+            if !closeTab(item) { break }
+        }
     }
 
     @objc private func ctxCloseAllTabs(_ sender: Any?) {
         contextMenuTargetItem = nil
         let all = tabView.tabViewItems
-        for item in all { closeTab(item) }
+        for item in all {
+            if !closeTab(item) { break }
+        }
     }
 
     @objc private func ctxTogglePin(_ sender: Any?) {
@@ -310,9 +334,10 @@ final class WorkspaceWindowController: NSWindowController, NSOutlineViewDataSour
     }
 
     /// Close a specific tab, prompting if it has unsaved changes.
-    private func closeTab(_ item: NSTabViewItem) {
+    @discardableResult
+    private func closeTab(_ item: NSTabViewItem) -> Bool {
         guard let container = item.viewController as? TabContainerViewController,
-              let file = container.file else { return }
+              let file = container.file else { return false }
         if file.isEdited {
             let alert = NSAlert()
             alert.messageText = "Save changes to \(file.url.lastPathComponent)?"
@@ -323,18 +348,20 @@ final class WorkspaceWindowController: NSWindowController, NSOutlineViewDataSour
             let r = alert.runModal()
             if r == .alertFirstButtonReturn {
                 do { try file.save() }
-                catch { NSAlert(error: error).runModal(); return }
+                catch { NSAlert(error: error).runModal(); return false }
             } else if r == .alertThirdButtonReturn {
-                return
+                return false
             }
         }
         let idx = tabView.indexOfTabViewItem(item)
+        guard idx != NSNotFound else { return false }
         tabView.removeTabViewItem(item)
         fileItemMap.removeValue(forKey: ObjectIdentifier(file))
         openFiles.removeAll { $0 === file }
         rebuildMRU(removingIndex: idx)
         updateEmptyHint()
         refreshTabBar()
+        return true
     }
 
     // MARK: Sequential tab navigation
@@ -421,13 +448,17 @@ final class WorkspaceWindowController: NSWindowController, NSOutlineViewDataSour
     /// Rebuild the visible tab bar from the current `tabView` state.
     /// Call after any add / remove / reorder / pin / edited-state change.
     func refreshTabBar() {
-        var descriptors: [(label: String, isPinned: Bool, isEdited: Bool)] = []
         for item in tabView.tabViewItems {
             if let container = item.viewController as? TabContainerViewController, let file = container.file {
-                descriptors.append((label: file.editorTitle, isPinned: file.isPinned, isEdited: file.isEdited))
-            } else {
-                descriptors.append((label: item.label, isPinned: false, isEdited: false))
+                item.label = tabLabel(for: file)
             }
+        }
+        let descriptors = tabView.tabViewItems.map { item -> (label: String, isPinned: Bool, isEdited: Bool) in
+            if let container = item.viewController as? TabContainerViewController,
+               let file = container.file {
+                return (label: file.editorTitle, isPinned: file.isPinned, isEdited: file.isEdited)
+            }
+            return (label: item.label, isPinned: false, isEdited: false)
         }
         let selected = tabView.selectedTabViewItem.flatMap { tabView.indexOfTabViewItem($0) } ?? -1
         tabBar.reload(tabs: descriptors, selected: selected)
@@ -585,6 +616,35 @@ final class WorkspaceWindowController: NSWindowController, NSOutlineViewDataSour
     // MARK: Quick switchers
 
     private var activeQuickPanel: QuickPanelController?
+
+    private func showOpenTabSwitcher(_ sender: Any?) {
+        let items = tabView.tabViewItems.enumerated().map { idx, item in
+            QuickPanelController.Item(
+                title: item.label,
+                subtitle: "Tab \(idx + 1)",
+                key: item.label,
+                payload: item
+            )
+        }
+        guard !items.isEmpty else { NSSound.beep(); return }
+
+        let panel = QuickPanelController()
+        panel.placeholder = "Show all tabs…"
+        panel.items = items
+        panel.onSelect = { [weak self] item in
+            self?.activeQuickPanel = nil
+            if let tab = item.payload as? NSTabViewItem {
+                self?.tabView.selectTabViewItem(tab)
+            }
+        }
+        if let win = self.window {
+            activeQuickPanel = panel
+            panel.present(over: win)
+            NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: panel.window, queue: .main) { [weak self] _ in
+                self?.activeQuickPanel = nil
+            }
+        }
+    }
 
     @IBAction func showQuickFileSwitcher(_ sender: Any?) {
         let entries = FileIndex.walk(root: rootURL)
