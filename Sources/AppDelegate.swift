@@ -185,6 +185,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    @IBAction func selectNextTab(_ sender: Any?) {
+        if let wc = NSApp.keyWindow?.windowController as? WorkspaceWindowController {
+            wc.selectNextTab(sender)
+        }
+    }
+
+    @IBAction func selectPreviousTab(_ sender: Any?) {
+        if let wc = NSApp.keyWindow?.windowController as? WorkspaceWindowController {
+            wc.selectPreviousTab(sender)
+        }
+    }
+
     @IBAction func quickFileSwitcher(_ sender: Any?) {
         if let wc = NSApp.keyWindow?.windowController as? WorkspaceWindowController {
             wc.showQuickFileSwitcher(sender)
@@ -541,6 +553,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mruBack.keyEquivalentModifierMask = [.control, .shift]
         mruBack.target = self
         windowMenu.addItem(mruBack)
+        let nextTab = NSMenuItem(title: "Select Next Tab", action: #selector(selectNextTab(_:)), keyEquivalent: "]")
+        nextTab.keyEquivalentModifierMask = [.command, .shift]
+        nextTab.target = self
+        windowMenu.addItem(nextTab)
+        let prevTab = NSMenuItem(title: "Select Previous Tab", action: #selector(selectPreviousTab(_:)), keyEquivalent: "[")
+        prevTab.keyEquivalentModifierMask = [.command, .shift]
+        prevTab.target = self
+        windowMenu.addItem(prevTab)
         windowMenu.addItem(NSMenuItem.separator())
         let pinItem = NSMenuItem(title: "Pin / Unpin Tab", action: #selector(toggleActiveTabPin(_:)), keyEquivalent: "")
         pinItem.target = self

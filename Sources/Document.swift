@@ -114,8 +114,16 @@ final class Document: NSDocument, EditingHost {
                                   .replacingOccurrences(of: "\r", with: "\n")
                 detectedLanguage = SyntaxHighlighter.detect(filename: self.fileURL?.lastPathComponent ?? "")
                 if let url = self.fileURL {
-                    let cfg = EditorConfigLoader.resolve(for: url)
-                    applyEditorConfig(cfg)
+                    // Walk the EditorConfig chain on a background queue —
+                    // see WorkspaceFile.resolveEditorConfigAsync for the
+                    // rationale.
+                    DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                        let cfg = EditorConfigLoader.resolve(for: url)
+                        DispatchQueue.main.async {
+                            self?.applyEditorConfig(cfg)
+                            self?.editorViewController?.applyHostIndentSettings()
+                        }
+                    }
                 }
                 editorViewController?.applyLoadedText()
                 return

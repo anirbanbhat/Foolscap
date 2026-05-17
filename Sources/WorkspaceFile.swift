@@ -38,12 +38,34 @@ final class WorkspaceFile: EditingHost {
                 let normalized = s.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
                 let lang = SyntaxHighlighter.detect(filename: url.lastPathComponent)
                 let file = WorkspaceFile(url: url, text: normalized, encoding: enc, lineEnding: eol, language: lang)
-                let cfg = EditorConfigLoader.resolve(for: url)
-                file.applyEditorConfig(cfg)
+                // Resolve EditorConfig in the background. The walk does
+                // fileExists checks up the directory tree, which can stall
+                // the main thread when parent directories live in iCloud /
+                // network mounts.
+                file.resolveEditorConfigAsync()
                 return file
             }
         }
         throw NSError(domain: NSCocoaErrorDomain, code: NSFileReadInapplicableStringEncodingError)
+    }
+
+    /// Run EditorConfig walk on a background queue, then apply on main.
+    /// Settings landing slightly late is fine — the buffer is already in the
+    /// editor, and indentation/EOL/encoding only matter when the user saves
+    /// or hits Tab, by which time we've returned to the main thread anyway.
+    func resolveEditorConfigAsync() {
+        let url = self.url
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let cfg = EditorConfigLoader.resolve(for: url)
+            DispatchQueue.main.async { [weak self] in
+                self?.applyEditorConfig(cfg)
+                if let self = self {
+                    for ed in self.editors {
+                        ed.applyHostIndentSettings()
+                    }
+                }
+            }
+        }
     }
 
     /// Apply EditorConfig settings to encoding, line endings, and indent.
